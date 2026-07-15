@@ -1,138 +1,164 @@
-# Imagegen + Hatch Pet 跨电脑移植说明
+# Codex Third-Party ImageGen & Hatch Pet
 
-这套文件用于把自定义 `imagegen` 和 `hatch-pet` 技能迁移到另一台 Windows 电脑。图片生成会通过 `imagegen` 自带的包装器读取目标电脑上的：
+让 Codex 在不修改原有配置的情况下，通过第三方 OpenAI 兼容中转站生成图片，并创建可在 Codex Desktop 中使用的动态 Pet。
 
-```text
-%USERPROFILE%\.codex\imagegen.env
-```
+本项目包含两个 Codex Skill：
 
-`hatch-pet` 已明确允许并要求使用这条图片生成路径。
+- **ImageGen**：从独立的 `imagegen.env` 读取图片接口地址、API Key 和模型，不覆盖 Codex 原有配置。
+- **Hatch Pet**：根据文字描述、参考图或品牌特征，生成、校验并打包 Codex v2 动态 Pet。
 
-## 1. 文件说明
+> [!IMPORTANT]
+> 仓库中的 `imagegen.env` 仅为脱敏模板。请勿将真实 API Key 提交到 GitHub。
 
-需要带到另一台电脑的内容就是这四项：
+## 功能特点
 
-```text
-Desktop\
-├─ .system\
-│  └─ imagegen\
-├─ hatch-pet\
-├─ imagegen.env
-└─ Readme.md
-```
+### 使用第三方中转站生图
 
-- `.system`：其中包含修改后的 `imagegen` 图片生成技能和 `imagegen.env` 加载包装器。
-- `hatch-pet`：Codex v2 动态宠物生成、校验和打包技能。
-- `imagegen.env`：图片接口地址、API Key 和模型配置。此文件包含敏感信息，不要上传到网盘公开链接、GitHub 或聊天窗口。
-- `Readme.md`：本迁移说明。
-
-## 2. 目标电脑要求
-
-1. 安装并至少启动一次 Codex Desktop。
-2. Windows 用户目录下能够创建 `%USERPROFILE%\.codex`。
-3. 能够访问 `OPENAI_BASE_URL` 指向的图片接口。
-4. 如运行时提示缺少 Python 包，需要安装 `openai` 和 `Pillow`。
-
-## 3. 安装技能
-
-不需要运行安装脚本，也不需要压缩或解压。先完全退出 Codex Desktop，再手动复制文件夹和文件。
-
-### 3.1 安装 imagegen
-
-把桌面上的整个 `.system` 文件夹复制到：
-
-```text
-C:\Users\你的用户名\.codex\skills\
-```
-
-复制完成后必须得到：
-
-```text
-C:\Users\你的用户名\.codex\skills\.system\imagegen\SKILL.md
-```
-
-如果目标电脑的 `skills` 目录中已经有 `.system` 文件夹，不要删除整个现有 `.system`。打开迁移包的 `.system`，只把里面的 `imagegen` 文件夹复制到目标电脑的 `.codex\skills\.system` 中。若已有同名 `imagegen`，先将旧文件夹改名备份，再放入新的 `imagegen`。
-
-### 3.2 安装 hatch-pet
-
-把桌面上的整个 `hatch-pet` 文件夹复制到：
-
-```text
-C:\Users\你的用户名\.codex\skills\
-```
-
-复制完成后必须得到：
-
-```text
-C:\Users\你的用户名\.codex\skills\hatch-pet\SKILL.md
-```
-
-不要复制成 `hatch-pet\hatch-pet\SKILL.md`。如果目标电脑已经有同名 `hatch-pet` 文件夹，先将旧文件夹改名备份。
-
-### 3.3 放置配置文件
-
-把 `imagegen.env` 复制到：
-
-```text
-C:\Users\你的用户名\.codex\imagegen.env
-```
-
-最终文件不能放在 `skills`、`imagegen` 或 `hatch-pet` 文件夹里面。
-
-如果看不到 `.codex` 隐藏目录，可以在文件资源管理器地址栏直接输入：
-
-```text
-%USERPROFILE%\.codex
-```
-
-如果 `skills` 或 `.system` 文件夹不存在，可以手动新建。
-
-## 4. 配置 imagegen.env
-
-目标路径必须是：
+ImageGen 通过独立包装器读取：
 
 ```text
 %USERPROFILE%\.codex\imagegen.env
 ```
 
-文件格式：
+它只读取以下三个变量：
 
 ```dotenv
-OPENAI_API_KEY=替换为目标电脑使用的API_KEY
-OPENAI_BASE_URL=https://你的图片接口地址/v1
+OPENAI_API_KEY=你的API_KEY
+OPENAI_BASE_URL=https://你的中转站地址/v1
 OPENAI_IMAGE_MODEL=gpt-image-2
 ```
 
-注意事项：
+这套方式不需要修改 Codex 原有配置文件，也不会改变 Codex 的模型、登录方式或其他环境设置。配置只传递给当前图片生成子进程。
 
-- `OPENAI_API_KEY` 和 `OPENAI_BASE_URL` 必须存在且不能为空。
-- `OPENAI_IMAGE_MODEL` 用于指定图片模型。
-- 模型值必须以 `gpt-image-` 开头，例如 `gpt-image-2`。
-- 包装器只读取上述三个键，不会加载文件中的其他变量。
-- `imagegen.env` 中的值优先于父进程中已有的同名环境变量。
-- 不要把真实 API Key 写进本 README。
+支持的主要图片任务包括：
 
-## 5. 安装 Python 依赖
+- 文生图
+- 图片编辑与参考图生成
+- 多张图片或多版本生成
+- 透明背景素材处理
+- 网站、游戏、产品图和 Sprite 等项目资源生成
 
-先尝试直接执行第 6 节的 dry-run。Dry-run 不需要联网，也不要求安装 `openai` 包。
+### 创建 Codex Pet
 
-只有真实生成时报 `No module named openai` 或类似错误时，才执行：
+Hatch Pet 可以根据以下内容创建 Codex v2 动态 Pet：
+
+- 文字描述
+- 人物或角色参考图
+- 品牌、产品或公司特征
+- 已有 Pet 或 Sprite Atlas
+
+生成流程包括基础形象、标准动画、16 个观察方向、透明背景处理、Atlas 校验和最终打包。最终 Pet 使用 `spriteVersionNumber: 2`，Atlas 规格为 `8 x 11`，包含 9 行标准动画和 2 行观察方向动画。
+
+## 项目结构
+
+```text
+.
+|-- .system/
+|   `-- imagegen/              # 修改后的 ImageGen Skill
+|       |-- SKILL.md
+|       |-- scripts/
+|       `-- references/
+|-- hatch-pet/                 # Codex Pet 创建与校验 Skill
+|   |-- SKILL.md
+|   |-- scripts/
+|   |-- references/
+|   `-- tests/
+|-- imagegen.env               # 已脱敏的配置模板
+|-- .gitignore
+`-- Readme.md
+```
+
+## 环境要求
+
+- Codex Desktop
+- Windows 11，或其他受 Codex Desktop 支持的系统
+- Python 3.10 或更高版本
+- 可访问的 OpenAI Images API 兼容中转站
+- 中转站支持 `gpt-image-*` 图片模型
+
+真实生成图片时可能需要安装：
 
 ```powershell
 py -m pip install --upgrade openai pillow
 ```
 
-如果目标电脑使用 `uv` 管理 Python，也可以执行：
+Dry-run 配置测试不联网，也不要求安装 `openai`。
+
+## 安装
+
+### 1. 克隆仓库
 
 ```powershell
-uv pip install --upgrade openai pillow
+git clone https://github.com/Xiazhixuan119748/hatch-pet-and-imagegen-.git
+Set-Location hatch-pet-and-imagegen-
 ```
 
-依赖必须安装到实际调用图片脚本的 Python 环境中。如果安装后仍提示缺包，先确认报错中显示的 Python 路径，再使用该 Python 执行 `-m pip install`。
+安装前请完全退出 Codex Desktop。
 
-## 6. 验证配置，不生成图片
+### 2. 安装 ImageGen
 
-关闭并重新打开 Codex Desktop，然后在 PowerShell 中执行：
+在 PowerShell 中执行：
+
+```powershell
+$CodexHome = Join-Path $env:USERPROFILE '.codex'
+$SkillHome = Join-Path $CodexHome 'skills'
+
+New-Item -ItemType Directory -Force -Path "$SkillHome\.system" | Out-Null
+Copy-Item '.\.system\imagegen' "$SkillHome\.system" -Recurse -Force
+```
+
+安装后应存在：
+
+```text
+%USERPROFILE%\.codex\skills\.system\imagegen\SKILL.md
+```
+
+如果已经安装过同名 ImageGen Skill，建议先备份原目录。不要删除 `.system` 中的其他系统 Skill。
+
+### 3. 安装 Hatch Pet
+
+```powershell
+Copy-Item '.\hatch-pet' $SkillHome -Recurse -Force
+```
+
+安装后应存在：
+
+```text
+%USERPROFILE%\.codex\skills\hatch-pet\SKILL.md
+```
+
+注意不要复制成 `hatch-pet\hatch-pet\SKILL.md`。
+
+### 4. 配置图片中转站
+
+先把仓库中的脱敏模板复制到 Codex 目录：
+
+```powershell
+Copy-Item '.\imagegen.env' "$CodexHome\imagegen.env"
+notepad "$CodexHome\imagegen.env"
+```
+
+只编辑 `%USERPROFILE%\.codex\imagegen.env` 这个副本，填写自己的配置：
+
+```dotenv
+OPENAI_API_KEY=替换为你的API_KEY
+OPENAI_BASE_URL=https://你的中转站地址/v1
+OPENAI_IMAGE_MODEL=gpt-image-2
+```
+
+配置要求：
+
+- `OPENAI_API_KEY` 和 `OPENAI_BASE_URL` 不能为空。
+- `OPENAI_BASE_URL` 应填写 OpenAI SDK 兼容基础地址，通常以 `/v1` 结尾。
+- 不要填写完整的 `/images/generations` 接口路径。
+- `OPENAI_IMAGE_MODEL` 必须是 `gpt-image-*` 模型，例如 `gpt-image-2`。
+- 请确认中转站实际支持所填写的图片模型和 Images API。
+
+完成后重新启动 Codex Desktop，使 Skill 被重新加载。
+
+## 验证配置
+
+在 PowerShell 中运行 dry-run：
 
 ```powershell
 $Imagegen = Join-Path $env:USERPROFILE '.codex\skills\.system\imagegen\scripts\image_gen_with_codex_env.py'
@@ -143,110 +169,103 @@ py $Imagegen generate `
   --out "$env:TEMP\imagegen-dry-run.png"
 ```
 
-成功时应看到类似信息：
+成功时会显示配置文件路径，并提示 API Key 已设置。输出中的模型应与 `OPENAI_IMAGE_MODEL` 一致。Dry-run 不会请求中转站、不会生成图片，也不会产生图片费用。
+
+## 使用方法
+
+### 通过第三方中转站生成图片
+
+在 Codex 中输入类似提示：
 
 ```text
-Using Codex image configuration from C:\Users\你的用户名\.codex\imagegen.env.
-OPENAI_API_KEY is set.
+使用 $imagegen 和 imagegen.env 中配置的接口，生成一张赛博朋克城市夜景。
 ```
 
-输出 JSON 中的模型应与 `OPENAI_IMAGE_MODEL` 一致。Dry-run 不会请求图片接口，也不会产生图片费用。
+ImageGen 会读取独立配置并调用中转站。真实生成会产生相应接口费用。
 
-## 7. 在 Codex 中验证技能
+### 创建 Codex Pet
 
-重新打开 Codex 后，可以分别测试：
+在 Codex 中输入：
 
 ```text
-使用 $imagegen，通过 imagegen.env 生成一张简单测试图片。
+使用 $hatch-pet 创建一个蓝白配色、3D 玩具风格的机器人 Pet。
 ```
+
+也可以附加参考图：
 
 ```text
-使用 $hatch-pet 创建一个简单的 Codex v2 宠物。
+使用 $hatch-pet，根据这张参考图创建一个 Codex v2 动态 Pet，保持角色的颜色和主要特征。
 ```
 
-真实图片测试会访问 `OPENAI_BASE_URL` 并可能产生接口费用。建议先用一张低成本测试图确认连接，再运行完整的 `hatch-pet` 流程。完整宠物会生成多张基础图和动画行，耗时和费用都明显高于单张图片。
+Hatch Pet 会自动调用本项目的 ImageGen 配置生成视觉素材。完整 Pet 需要生成多组动画图片，所需时间和接口费用明显高于单张图片生成。
 
-## 8. 安装后的目录结构
+## Windows 10 用户提醒
 
-正确安装后应为：
+> [!WARNING]
+> Codex Desktop 在 Windows 10 上可能显示需要修复 workspace dependency，但安装会失败，因为 Windows 10 当前不受支持。
+
+相关问题与解决进展请查看 OpenAI Codex 官方 Issue：
+
+**[Codex Desktop shows workspace dependency repair on Windows 10, but install fails because Windows 10 is unsupported](https://github.com/openai/codex/issues/19811)**
+
+如果你在 Windows 10 上遇到 workspace dependency repair、依赖安装失败或运行时不可用等问题，请前往该 Issue 查看讨论和对应解决方法。该问题来自 Codex Desktop 的系统支持限制，并非本项目的 ImageGen 或 Hatch Pet 配置错误。
+
+## 常见问题
+
+### Codex 没有识别 Skill
+
+完全退出并重新启动 Codex Desktop，然后检查以下路径：
 
 ```text
-%USERPROFILE%\.codex\
-├─ imagegen.env
-└─ skills\
-   ├─ .system\
-   │  └─ imagegen\
-   │     ├─ SKILL.md
-   │     ├─ scripts\
-   │     │  ├─ image_gen.py
-   │     │  └─ image_gen_with_codex_env.py
-   │     └─ references\
-   └─ hatch-pet\
-      ├─ SKILL.md
-      ├─ scripts\
-      ├─ references\
-      └─ tests\
-```
-
-不要把 `imagegen` 直接放到 `%USERPROFILE%\.codex\skills\imagegen`。当前 `hatch-pet` 使用的是系统技能路径：
-
-```text
-%USERPROFILE%\.codex\skills\.system\imagegen
-```
-
-## 9. 常见问题
-
-### 找不到 imagegen.env
-
-确认文件不是 `imagegen.env.txt`，并执行：
-
-```powershell
-Get-Item -Force "$env:USERPROFILE\.codex\imagegen.env"
-```
-
-### 提示缺少 OPENAI_API_KEY 或 OPENAI_BASE_URL
-
-检查 `imagegen.env` 中对应行是否存在、拼写正确且等号右侧不为空。不要在变量名前添加空格。
-
-### 模型名称错误
-
-`OPENAI_IMAGE_MODEL` 必须使用 `gpt-image-*` 模型名。推荐保持：
-
-```dotenv
-OPENAI_IMAGE_MODEL=gpt-image-2
-```
-
-### 401 或鉴权失败
-
-API Key 无效、过期，或者当前接口不接受该 Key。更换 `OPENAI_API_KEY` 后重试。
-
-### 404 或接口路径错误
-
-检查 `OPENAI_BASE_URL` 是否是 OpenAI SDK 兼容的基础地址。通常应包含 `/v1`，不要填写完整的 `/images/generations` 请求路径。
-
-### 连接超时
-
-确认目标电脑能够访问配置的域名，并检查代理、防火墙、DNS 和接口服务状态。
-
-### Codex 没有识别新技能
-
-确认目录结构正确，然后完全退出并重新启动 Codex Desktop。只刷新任务页面可能不足以重新加载技能。
-
-### hatch-pet 没有使用 imagegen.env
-
-确认安装的是本迁移包内的两个修改版技能，并检查以下文件是否存在：
-
-```text
-%USERPROFILE%\.codex\skills\.system\imagegen\scripts\image_gen_with_codex_env.py
+%USERPROFILE%\.codex\skills\.system\imagegen\SKILL.md
 %USERPROFILE%\.codex\skills\hatch-pet\SKILL.md
 ```
 
-`hatch-pet` 不应直接调用其他图片 API 或临时脚本；所有正常视觉生成都应交给 `$imagegen` 的 `image_gen_with_codex_env.py` 包装器。
+### 找不到 imagegen.env
 
-## 10. 安全建议
+确认配置文件位于：
 
-- 迁移完成后，从不安全的中转位置删除包含真实密钥的 `imagegen.env` 副本。
-- 不要把 `imagegen.env` 提交到 Git。
-- 不要在截图、终端日志或聊天中展示 API Key。
-- 如果密钥曾经通过公开渠道传输，立即在接口提供方后台撤销并重新生成。
-- 给配置文件仅保留当前 Windows 用户的读取权限会更稳妥。
+```text
+%USERPROFILE%\.codex\imagegen.env
+```
+
+不要把它放进 `skills`、`imagegen` 或 `hatch-pet` 文件夹。还需确认文件名不是 `imagegen.env.txt`。
+
+### 提示缺少 OPENAI_API_KEY 或 OPENAI_BASE_URL
+
+检查配置项拼写、等号右侧内容以及文件路径。不要在变量名前添加空格。
+
+### 返回 401 或鉴权失败
+
+API Key 可能无效、过期，或者中转站不接受该 Key。请在中转站后台确认密钥权限。
+
+### 返回 404 或接口路径错误
+
+确认 `OPENAI_BASE_URL` 是 OpenAI SDK 兼容基础地址。通常应包含 `/v1`，但不应包含完整的 `/images/generations` 路径。
+
+### 提示模型名称错误
+
+`OPENAI_IMAGE_MODEL` 必须使用 `gpt-image-*` 名称，并且中转站必须支持该模型。
+
+### 提示缺少 Python 模块
+
+执行：
+
+```powershell
+py -m pip install --upgrade openai pillow
+```
+
+依赖必须安装到实际运行图片脚本的 Python 环境。如果安装后仍提示缺包，请根据报错中的 Python 路径使用对应解释器执行 `-m pip install`。
+
+## 安全说明
+
+- 仓库中的 `imagegen.env` 是脱敏模板，不包含可用凭据。
+- 请在复制后的 `%USERPROFILE%\.codex\imagegen.env` 中填写真实密钥。
+- 不要把真实 API Key 写回仓库中的模板文件。
+- 不要在 GitHub、截图、终端日志或聊天记录中展示真实 API Key。
+- 如果密钥曾被公开，请立即在中转站后台撤销并重新生成。
+- 包装器不会打印 API Key，也不会把凭据作为命令行参数传递。
+
+## License
+
+ImageGen 和 Hatch Pet 目录中的内容分别遵循各自 `LICENSE.txt` 中的许可条款。

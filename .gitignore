@@ -3,6 +3,7 @@
 .env
 .env.*
 !.env.example
+!imagegen.env
 
 # Python-generated files
 __pycache__/
