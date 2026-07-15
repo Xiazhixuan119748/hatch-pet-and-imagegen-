@@ -1,0 +1,20 @@
+# Local credentials and environment configuration
+*.env
+.env
+.env.*
+!.env.example
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+
+# Test and tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS and editor metadata
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
