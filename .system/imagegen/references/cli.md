@@ -1,8 +1,8 @@
-# CLI reference (`scripts/image_gen.py`)
+# CLI reference
 
-This file is for the fallback CLI mode only. Read it when the user explicitly asks to use `scripts/image_gen.py` / CLI / API / model controls, or after the user explicitly confirms that a transparent-output request should use the `gpt-image-1.5` true-transparency fallback path.
+Read this file for configured `imagegen.env` Provider mode or when the user explicitly asks to use `scripts/image_gen.py` / CLI / API / model controls. OpenAI true-transparency fallback still requires the user's explicit confirmation unless they already requested that path.
 
-`generate-batch` is a CLI subcommand in this fallback path. It is not a top-level mode of the skill.
+`generate-batch` is a CLI subcommand, not a top-level mode of the skill.
 The word `batch` in a user request is not CLI opt-in by itself.
 
 ## What this CLI does
@@ -10,9 +10,122 @@ The word `batch` in a user request is not CLI opt-in by itself.
 - `edit`: edit one or more existing images
 - `generate-batch`: run many generation jobs from a JSONL file after the user explicitly chooses CLI/API/model controls
 
-Real API calls require **network access** + `OPENAI_API_KEY`. `--dry-run` does not.
+Real API calls require network access and the selected Provider's API key. `--dry-run` does not.
 
-For the user-authorized Codex configuration path, invoke `scripts/image_gen_with_codex_env.py` with the same subcommand and arguments. It loads `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and optional `OPENAI_IMAGE_MODEL` from `${CODEX_HOME:-$HOME/.codex}/imagegen.env`, never prints their values, and delegates to this CLI. `$hatch-pet` visual jobs must use this wrapper.
+For the user-authorized Codex configuration path, invoke `scripts/image_gen_with_codex_env.py` with the same subcommand and arguments. It reads `IMAGE_PROVIDER` from `${CODEX_HOME:-$HOME/.codex}/imagegen.env`, never prints credential values, and delegates to the matching OpenAI, Gemini, Grok, or Agnes CLI. `$hatch-pet` visual jobs must use this wrapper.
+
+## Configured Provider mode
+
+`IMAGE_PROVIDER` accepts `openai`, `gemini`, `grok`, or `agnes` and defaults to `openai`. The wrapper passes only the selected Provider's managed variables to the child process.
+
+OpenAI configuration:
+
+```dotenv
+IMAGE_PROVIDER=openai
+OPENAI_API_KEY=replace-with-your-api-key
+OPENAI_BASE_URL=https://your-image-api.example/v1
+OPENAI_IMAGE_MODEL=gpt-image-2
+```
+
+Gemini configuration:
+
+```dotenv
+IMAGE_PROVIDER=gemini
+GEMINI_API_KEY=replace-with-your-gemini-api-key
+GEMINI_IMAGE_MODEL=gemini-3.1-flash-image
+GEMINI_API_MODE=generate-content
+# GEMINI_BASE_URL=https://your-gemini-relay.example
+```
+
+Grok configuration:
+
+```dotenv
+IMAGE_PROVIDER=grok
+XAI_API_KEY=replace-with-your-xai-api-key
+XAI_IMAGE_MODEL=grok-imagine-image-quality
+# XAI_BASE_URL=https://api.x.ai/v1
+```
+
+Agnes configuration:
+
+```dotenv
+IMAGE_PROVIDER=agnes
+AGNES_API_KEY=replace-with-your-agnes-api-key
+AGNES_IMAGE_MODEL=agnes-image-2.1-flash
+# AGNES_BASE_URL=https://apihub.agnes-ai.com/v1
+```
+
+Install configured-mode dependencies with `py -m pip install --upgrade openai google-genai httpx pillow`. Dry-run does not call any API.
+
+Gemini keeps the `generate`, `edit`, and `generate-batch` command names. `GEMINI_API_MODE` accepts `generate-content` or `interactions` and defaults to `generate-content` when omitted. It selects the request and response schema before the request; failures never switch API formats automatically. Provider-specific behavior:
+
+- Official Google IDs and common third-party IDs are both accepted: `gemini-3.1-flash-lite-image` / `nano-banana-2-lite`, `gemini-3.1-flash-image` / `nano-banana-2`, `gemini-3-pro-image` / `nano-banana-pro`, and `gemini-2.5-flash-image` / `nano-banana`. Alias values are passed to the configured provider unchanged.
+- Local model-specific restrictions are enforced only when Google documents them explicitly: 3.1 Flash Lite and `nano-banana-2-lite` are limited to `1K`; 3.1 Flash Image and `nano-banana-2` may also select `0.5K`. Other aliases are not assigned inferred limits.
+- `--n` creates N independent requests; every returned image block is saved.
+- Repeated `--image` values retain command-line order in an edit request.
+- `--size` maps to a supported aspect ratio and `1K`, `2K`, or `4K`. Unsupported ratios fail instead of rounding; Lite models accept only `1K`.
+- `--mask` and `--background transparent` fail explicitly. Use a flat chroma-key background plus local removal.
+- Explicit `--quality`, `--input-fidelity`, and `--moderation` values warn because they are not mapped. `--output-compression`, WebP conversion, and downscaling are local Pillow operations.
+- `generate-batch` remains immediate concurrent execution, not Google Batch API.
+
+Configured Gemini dry-run:
+
+```bash
+python "$CODEX_HOME/skills/.system/imagegen/scripts/image_gen_with_codex_env.py" generate \
+  --prompt "Test" \
+  --size 1024x1024 \
+  --out output/imagegen/gemini-test.png \
+  --dry-run
+```
+
+Grok uses xAI JSON REST for both generation and editing. Its generation endpoint is OpenAI SDK compatible, but OpenAI SDK `images.edit()` is not: xAI edits require JSON instead of multipart. Provider behavior:
+
+- Supported model IDs are `grok-imagine-image`, `grok-imagine-image-2026-03-02`, `grok-imagine-image-quality`, `grok-imagine-image-quality-20260403`, `grok-imagine-image-quality-latest`, and `grok-imagine-image-pro`. The default remains `grok-imagine-image-quality`.
+- Same-prompt `--n` maps to one request and supports 1-10 images.
+- Edit accepts one to three ordered `--image` values. Each value may be a local image path, an `http(s)` image URL, or `file_id:<id>` from the xAI Files API. Multiple inputs are referenced as `<IMAGE_0>`, `<IMAGE_1>`, and `<IMAGE_2>` in the prompt.
+- `--size` maps to an official aspect ratio plus `1k` or `2k`; inputs above 2K warn and map down to `2k`.
+- The Provider requests `b64_json` by default and can also consume temporary URL responses.
+- `--mask` and `--background transparent` fail explicitly. Quality, input fidelity, and moderation controls are not mapped.
+- `generate-batch` uses immediate concurrent requests, not xAI Batch API.
+
+Grok Files API commands use the same `XAI_API_KEY`:
+
+```bash
+python "$CODEX_HOME/skills/.system/imagegen/scripts/image_gen_with_codex_env.py" files upload --file reference.png
+python "$CODEX_HOME/skills/.system/imagegen/scripts/image_gen_with_codex_env.py" files list
+python "$CODEX_HOME/skills/.system/imagegen/scripts/image_gen_with_codex_env.py" files get file-...
+python "$CODEX_HOME/skills/.system/imagegen/scripts/image_gen_with_codex_env.py" files delete file-...
+```
+
+Configured Grok dry-run:
+
+```bash
+python "$CODEX_HOME/skills/.system/imagegen/scripts/image_gen_with_codex_env.py" generate \
+  --prompt "Test" \
+  --size 1920x1080 \
+  --out output/imagegen/grok-test.png \
+  --dry-run
+```
+
+Agnes uses OpenAI-style authentication and `data[]` responses, but its image request body is Provider-specific:
+
+- All generation and editing requests post JSON to `/images/generations`.
+- Edit images are ordered Data URIs under `extra_body.image`; `extra_body.response_format` selects `b64_json`.
+- Text generation requests Base64 with `return_base64: true`.
+- `agnes-image-2.1-flash` maps exact supported ratios to `1K`-`4K` tiers; `agnes-image-2.0-flash` keeps exact pixel sizes.
+- Same-prompt `--n` creates independent requests because Agnes image docs do not define `n`.
+- Up to 16 edit references are accepted as a local safety policy, not a documented service limit.
+- `--mask` and native transparent output are unsupported.
+
+Configured Agnes dry-run:
+
+```bash
+python "$CODEX_HOME/skills/.system/imagegen/scripts/image_gen_with_codex_env.py" generate \
+  --prompt "Test" \
+  --size 1920x1080 \
+  --out output/imagegen/agnes-test.png \
+  --dry-run
+```
 
 ## Quick start (works from any repo)
 Set a stable path to the skill CLI (default `CODEX_HOME` is `~/.codex`):
@@ -81,7 +194,7 @@ python "$IMAGE_GEN" edit \
 - Square images are typically fastest. Use `--size 1024x1024` for quick square drafts.
 - If the user asks for 4K-style output, use `--size 3840x2160` for landscape or `--size 2160x3840` for portrait.
 - Do not pass `--input-fidelity` with `gpt-image-2`; this model always uses high fidelity for image inputs.
-- Do not use `--background transparent` with `gpt-image-2`; the default transparent-image workflow uses built-in `image_gen` on a flat chroma-key background plus local removal. Use `gpt-image-1.5` only after the user explicitly confirms the true-transparent CLI fallback, unless they already requested `gpt-image-1.5`, `scripts/image_gen.py`, or CLI fallback.
+- Do not use `--background transparent` with `gpt-image-2`; the default transparent-image workflow uses the selected configured Provider or built-in tool on a flat chroma-key background plus local removal. Use `gpt-image-1.5` only after the user explicitly confirms the true-transparent CLI fallback, unless they already requested `gpt-image-1.5`, `scripts/image_gen.py`, or CLI fallback.
 
 Popular `gpt-image-2` sizes:
 - `1024x1024`
@@ -143,7 +256,7 @@ python "$IMAGE_GEN" generate \
   --out output/imagegen/product-cutout.png
 ```
 
-When using this path, explain briefly that built-in `image_gen` plus chroma-key removal is the default transparent-image path, but this request needs true model-native transparency. `gpt-image-2` does not support `background=transparent`, so `gpt-image-1.5` is required for this confirmed fallback.
+When using this path, explain briefly that the selected default path normally uses chroma-key removal, but this request needs true model-native transparency. `gpt-image-2` does not support `background=transparent`, so `gpt-image-1.5` is required for this confirmed fallback.
 
 ## Quality, input fidelity, and masks (CLI fallback only)
 These are explicit CLI controls. They are not built-in `image_gen` tool arguments.

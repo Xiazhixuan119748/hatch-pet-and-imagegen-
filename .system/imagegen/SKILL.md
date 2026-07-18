@@ -11,8 +11,8 @@ Generates or edits images for the current project (for example website assets, g
 
 This skill has three top-level modes:
 
-- **Default built-in tool mode (preferred):** built-in `image_gen` tool for normal image generation, editing, and simple transparent-image requests. Does not require `OPENAI_API_KEY`.
-- **Configured Codex `imagegen.env` CLI mode:** `scripts/image_gen_with_codex_env.py`, which loads only `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_IMAGE_MODEL` from `${CODEX_HOME:-$HOME/.codex}/imagegen.env`. Values from this canonical file override inherited variables for the delegated CLI process. Use this mode when the user asks to use that local configuration or when a calling skill explicitly requires it. This mode is mandatory for `$hatch-pet` visual jobs.
+- **Configured Codex `imagegen.env` CLI mode (preferred when configured):** `scripts/image_gen_with_codex_env.py`, which selects `openai`, `gemini`, `grok`, or `agnes` from `${CODEX_HOME:-$HOME/.codex}/imagegen.env` and passes only that Provider's managed settings to its delegated CLI. When the canonical file exists, use this mode by default for generation and editing without requiring the user to mention the file. Values from this canonical file override inherited variables for the delegated process. This mode is mandatory for `$hatch-pet` visual jobs.
+- **Built-in tool mode:** use the built-in `image_gen` tool when the canonical `imagegen.env` file does not exist, unless the user explicitly selects another supported path. It does not require an API key.
 - **Fallback CLI mode:** `scripts/image_gen.py` CLI. Use when the user explicitly asks for the CLI/API/model path, or after the user explicitly confirms a true model-native transparency fallback with `gpt-image-1.5`. Requires `OPENAI_API_KEY`.
 
 Within CLI fallback, the CLI exposes three subcommands:
@@ -22,17 +22,23 @@ Within CLI fallback, the CLI exposes three subcommands:
 - `generate-batch`
 
 Rules:
-- Use the built-in `image_gen` tool by default for normal image generation and editing requests.
-- Treat an explicit request to use `${CODEX_HOME:-$HOME/.codex}/imagegen.env`, or a `$hatch-pet` invocation, as authorization for configured Codex `imagegen.env` CLI mode. Do not ask again before using that mode.
+- Check for `${CODEX_HOME:-$HOME/.codex}/imagegen.env` before choosing a generation path. When it exists, use configured Codex `imagegen.env` CLI mode by default for normal generation and editing requests; the user does not need to name the file in the prompt.
+- Treat an explicit `$imagegen` request or a `$hatch-pet` invocation as authorization to use the configured wrapper when the canonical file exists. Do not ask again before using that mode.
+- Use the built-in `image_gen` tool only when the canonical file does not exist or when the user explicitly requests the built-in tool.
 - In configured Codex `imagegen.env` CLI mode, invoke `scripts/image_gen_with_codex_env.py`; do not source the file in a shell, print its values, copy secrets into prompts/manifests, or pass credentials as command-line arguments.
-- The configured wrapper requires `OPENAI_API_KEY` and `OPENAI_BASE_URL`. It uses `OPENAI_IMAGE_MODEL` as the default `--model` only when it is a `gpt-image-*` model; an explicit `--model` still takes precedence.
+- The configured wrapper defaults `IMAGE_PROVIDER` to `openai` for backward compatibility. OpenAI requires `OPENAI_API_KEY` and `OPENAI_BASE_URL`; Gemini requires `GEMINI_API_KEY`; Grok requires `XAI_API_KEY`; Agnes requires `AGNES_API_KEY`. Non-OpenAI Providers use their official endpoints unless their matching base URL is set. The selected Provider's `*_IMAGE_MODEL` supplies the default `--model`; an explicit `--model` takes precedence. Never fall back to another Provider when selected configuration is missing.
+- In configured Gemini mode, use the bundled `scripts/gemini_image_gen.py` through the wrapper. It supports `generate`, multi-reference `edit`, and immediate concurrent `generate-batch` with both Gemini API formats. `GEMINI_API_MODE` defaults to `generate-content` for relay compatibility; set it to `interactions` explicitly for the newer API. It maps `--size` to a supported Gemini aspect ratio plus `1K`/`2K`/`4K`, makes one independent request per `--n`, rejects `--mask` and `background=transparent`, and handles PNG/JPEG/WebP conversion locally. Read `references/cli.md` and `references/image-api.md` for Provider-specific constraints.
+- In configured Grok mode, use `scripts/grok_image_gen.py` through the wrapper. It supports the official `grok-imagine-image` and `grok-imagine-image-quality` families and their published aliases, uses xAI JSON REST for generation and editing, accepts local paths, public URLs, and `file_id:<id>` references for up to three ordered edit inputs, exposes xAI Files API upload/list/get/delete commands, maps `--size` to a supported aspect ratio plus `1k`/`2k`, sends one same-prompt request for `--n`, and rejects `--mask` and `background=transparent`. Grok generation is OpenAI SDK compatible, but Grok editing is not because xAI requires JSON rather than multipart.
+- In configured Agnes mode, use `scripts/agnes_image_gen.py` through the wrapper. Every workflow posts JSON to `/images/generations`; edit references and `response_format` belong under `extra_body`, not OpenAI's multipart edit endpoint or top-level response controls. Prefer `agnes-image-2.1-flash` with `1K`-`4K` plus a supported ratio; retain `agnes-image-2.0-flash` for exact-size compatibility. Same-prompt `--n` creates independent requests.
 - Do not switch to CLI fallback for ordinary quality, size, or file-path control.
-- If the user explicitly asks for a transparent image/background, stay on built-in `image_gen` first: prompt for a flat removable chroma-key background, then remove it locally with the installed helper at `$CODEX_HOME/skills/.system/imagegen/scripts/remove_chroma_key.py`.
+- If the user explicitly asks for a transparent image/background, use the already selected configured or built-in generation path to create a flat removable chroma-key background, then remove it locally with the installed helper at `$CODEX_HOME/skills/.system/imagegen/scripts/remove_chroma_key.py`.
 - Never silently switch from built-in `image_gen` or CLI `gpt-image-2` to CLI `gpt-image-1.5`. Treat this as a model/path downgrade and ask the user before doing it, unless the user has already explicitly requested `gpt-image-1.5`, `scripts/image_gen.py`, or CLI fallback.
 - If a transparent request appears too complex for clean chroma-key removal, asks for true/native transparency, or local removal fails validation, explain that true transparency requires CLI `gpt-image-1.5 --background transparent --output-format png` because `gpt-image-2` does not support `background=transparent`, then ask whether to proceed. Run the CLI fallback only after the user confirms.
-- The word `batch` by itself does not mean CLI fallback. If the user asks for many assets or says to batch-generate assets without explicitly asking for CLI/API/model controls, stay on the built-in path and issue one built-in call per requested asset or variant.
-- If the built-in tool fails or is unavailable, tell the user the CLI fallback exists and that it requires `OPENAI_API_KEY`. Proceed only if the user explicitly asks for that fallback.
-- If the user explicitly asks for CLI mode, use the bundled `scripts/image_gen.py` workflow. Do not create one-off SDK runners.
+- The word `batch` by itself does not select a Provider. Stay on the configured path when the canonical file exists; otherwise stay on the built-in path. Use one request per distinct prompt or asset, and use `generate-batch` only in configured CLI mode when its immediate concurrent execution matches the task.
+- Never claim an API key is missing before the configured wrapper validates the selected Provider's file settings.
+- If the configured wrapper reports missing or invalid selected-Provider settings, report that exact configuration error and stop. Do not fall back to another Provider or to inherited shell credentials.
+- Only offer the unconfigured `scripts/image_gen.py` fallback when the canonical `imagegen.env` file does not exist and the user explicitly asks for CLI/API/model mode or confirms that fallback.
+- If the user explicitly asks for unconfigured OpenAI CLI mode, use the bundled `scripts/image_gen.py` workflow. In configured Provider mode, always use the wrapper. Do not create one-off SDK runners.
 - Never modify `scripts/image_gen.py`. If something is missing, ask the user before doing anything else.
 
 Built-in save-path policy:
@@ -89,14 +95,14 @@ Built-in edit semantics:
 - For edits, preserve invariants aggressively and save non-destructively by default.
 
 Execution strategy:
-- In the built-in default path, produce many assets or variants by issuing one `image_gen` call per requested asset or variant.
+- In the built-in path, produce many assets or variants by issuing one `image_gen` call per requested asset or variant.
 - In the CLI fallback path, use the CLI `generate-batch` subcommand only when the user explicitly chose CLI mode and needs many prompts/assets.
 - For many distinct assets, do not use `n` as a substitute for separate prompts. `n` is for variants of one prompt; distinct assets need distinct built-in calls or distinct CLI `generate-batch` jobs.
 
 Assume the user wants a new image unless they clearly ask to change an existing one.
 
 ## Workflow
-1. Decide the top-level mode: configured Codex `imagegen.env` CLI mode when explicitly requested or required by `$hatch-pet`; otherwise built-in by default, including simple transparent-output requests; fallback CLI only if explicitly requested or after the user explicitly confirms a transparent-output fallback.
+1. Decide the top-level mode by checking the canonical Codex `imagegen.env` file first. If it exists, use configured mode by default. If it does not exist, use built-in mode unless the user explicitly requests or confirms the unconfigured fallback CLI. `$hatch-pet` requires configured mode.
 2. Decide the intent: `generate` or `edit`.
 3. Decide whether the output is preview-only or meant to be consumed by the current project.
 4. Decide the execution strategy: single asset vs repeated built-in calls vs CLI `generate-batch`.
@@ -110,8 +116,8 @@ Assume the user wants a new image unless they clearly ask to change an existing 
 9. Augment the prompt based on specificity:
    - If the user's prompt is already specific and detailed, normalize it into a clear spec without adding creative requirements.
    - If the user's prompt is generic, add tasteful augmentation only when it materially improves output quality.
-10. Use configured Codex `imagegen.env` CLI mode for `$hatch-pet` and other explicitly authorized local-endpoint requests. Use the built-in `image_gen` tool by default otherwise.
-11. For transparent-output requests, follow the transparent image guidance below: generate with built-in `image_gen` on a flat chroma-key background, copy the selected output into the workspace or `tmp/imagegen/`, run the installed `$CODEX_HOME/skills/.system/imagegen/scripts/remove_chroma_key.py` helper, and validate the alpha result before using it. If this path looks unsuitable or fails, ask before switching to CLI `gpt-image-1.5`.
+10. Use configured Codex `imagegen.env` CLI mode whenever the canonical file exists, including ordinary `$imagegen` requests and every `$hatch-pet` visual job. The user does not need to mention `imagegen.env` in the prompt.
+11. For transparent-output requests, follow the transparent image guidance below: generate on a flat chroma-key background through the selected configured or built-in path, save the selected output into the workspace or `tmp/imagegen/`, run the installed `$CODEX_HOME/skills/.system/imagegen/scripts/remove_chroma_key.py` helper, and validate the alpha result before using it. If this path looks unsuitable or fails, ask before switching to CLI `gpt-image-1.5`.
 12. Inspect outputs and validate: subject, style, composition, text accuracy, and invariants/avoid items.
 13. Iterate with a single targeted change, then re-check.
 14. For preview-only work, render the image inline; the underlying file may remain at the default `$CODEX_HOME/generated_images/...` path.
@@ -122,10 +128,10 @@ Assume the user wants a new image unless they clearly ask to change an existing 
 
 ## Transparent image requests
 
-Transparent-image requests still use built-in `image_gen` first. Because the built-in tool does not expose a true transparent-background control, create a removable chroma-key source image and then convert the key color to alpha locally.
+Transparent-image requests keep the same path priority as other requests: configured mode when the canonical `imagegen.env` file exists, otherwise built-in mode. Because not every selected Provider exposes compatible native transparency controls, create a removable chroma-key source image and then convert the key color to alpha locally.
 
 Default sequence:
-1. Use built-in `image_gen` to generate the requested subject on a perfectly flat solid chroma-key background.
+1. Use the selected configured or built-in path to generate the requested subject on a perfectly flat solid chroma-key background.
 2. Choose a key color that is unlikely to appear in the subject: default `#00ff00`, use `#ff00ff` for green subjects, and avoid `#0000ff` for blue subjects.
 3. After generation, move or copy the selected source image from `$CODEX_HOME/generated_images/...` into the workspace or `tmp/imagegen/`.
 4. Run the installed helper path, not a project-relative script path:
@@ -157,7 +163,7 @@ Do not automatically use CLI `gpt-image-1.5 --background transparent --output-fo
 Use a concise confirmation like:
 
 ```text
-This likely needs true native transparency. The default built-in path uses a chroma-key background plus local removal, but true transparency requires the CLI fallback with gpt-image-1.5 because gpt-image-2 does not support background=transparent. It also requires OPENAI_API_KEY. Should I proceed with that CLI fallback?
+This likely needs true native transparency. The default configured or built-in path uses a chroma-key background plus local removal, but true transparency requires the CLI fallback with gpt-image-1.5 because gpt-image-2 does not support background=transparent. It also requires OPENAI_API_KEY. Should I proceed with that CLI fallback?
 ```
 
 ## Prompt augmentation
@@ -206,7 +212,7 @@ Edit:
 - identity-preserve — try-on, person-in-scene; lock face/body/pose.
 - precise-object-edit — remove/replace a specific element (including interior swaps).
 - lighting-weather — time-of-day/season/atmosphere changes only.
-- background-extraction — transparent background / clean cutout. Use built-in `image_gen` with chroma-key removal first for simple opaque subjects; ask before using CLI true transparency for complex subjects.
+- background-extraction — transparent background / clean cutout. Use the selected configured or built-in path with chroma-key removal first for simple opaque subjects; ask before using CLI true transparency for complex subjects.
 - style-transfer — apply reference style while changing subject/scene.
 - compositing — multi-image insert/merge with matched lighting/perspective.
 - sketch-to-render — drawing/line art to photoreal render.
@@ -277,7 +283,7 @@ Constraints: change only the background; keep the product and its edges unchange
 - If the prompt is generic, add only the extra detail that will materially help.
 - If the prompt is already detailed, normalize it instead of expanding it.
 - For CLI fallback only, see `references/cli.md` and `references/image-api.md` for model, `quality`, `input_fidelity`, masks, output format, and output-path guidance.
-- For transparent images, use the built-in-first chroma-key workflow unless the request is complex enough to need true CLI transparency; ask before switching to CLI `gpt-image-1.5`.
+- For transparent images, use the selected-path chroma-key workflow unless the request is complex enough to need true CLI transparency; ask before switching to CLI `gpt-image-1.5`.
 
 More principles shared by both modes: `references/prompting.md`.
 Copy/paste specs shared by both modes: `references/sample-prompts.md`.
@@ -290,7 +296,7 @@ Asset-type templates (website assets, game assets, wireframes, logo) are consoli
 The fallback CLI defaults to `gpt-image-2`.
 
 - Use `gpt-image-2` for new CLI/API workflows unless the request needs true model-native transparent output.
-- If a transparent request may need CLI fallback, ask before using `gpt-image-1.5` unless the user already explicitly requested `gpt-image-1.5`, `scripts/image_gen.py`, or CLI fallback. Explain that the built-in chroma-key path is the default, but true transparency requires `gpt-image-1.5` because `gpt-image-2` does not support `background=transparent`.
+- If a transparent request may need CLI fallback, ask before using `gpt-image-1.5` unless the user already explicitly requested `gpt-image-1.5`, `scripts/image_gen.py`, or CLI fallback. Explain that the default path uses chroma-key removal, but true transparency requires `gpt-image-1.5` because `gpt-image-2` does not support `background=transparent`.
 - `gpt-image-2` always uses high fidelity for image inputs; do not set `input_fidelity` with this model.
 - `gpt-image-2` supports `quality` values `low`, `medium`, `high`, and `auto`.
 - Use `quality low` for fast drafts, thumbnails, and quick iterations. Use `medium`, `high`, or `auto` for final assets, dense text, diagrams, identity-sensitive edits, or high-resolution outputs.
@@ -308,7 +314,7 @@ Popular `gpt-image-2` sizes:
 - `2160x3840` 4K portrait
 - `auto`
 
-## Fallback CLI mode only
+## CLI modes only
 
 ### Temp and output conventions
 These conventions apply only to the CLI fallback. They do not describe built-in `image_gen` output behavior.
@@ -319,9 +325,9 @@ These conventions apply only to the CLI fallback. They do not describe built-in 
 ### Dependencies
 Prefer `uv` for dependency management in this repo.
 
-Required Python package:
+Required Python packages for the Provider(s) in use:
 ```bash
-uv pip install openai
+uv pip install openai google-genai httpx
 ```
 
 Required for local chroma-key removal and optional downscaling:
@@ -334,14 +340,14 @@ Portability note:
 - In uv-managed environments, `uv pip install ...` remains the preferred path.
 
 ### Environment
-- `OPENAI_API_KEY` must be set for live API calls.
-- For configured Codex `imagegen.env` CLI mode, keep `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and optional `OPENAI_IMAGE_MODEL` in `${CODEX_HOME:-$HOME/.codex}/imagegen.env` and invoke `scripts/image_gen_with_codex_env.py`. Never print their values.
+- The selected Provider's API key must be set for live API calls.
+- For configured Codex `imagegen.env` CLI mode, keep `IMAGE_PROVIDER` plus the matching `OPENAI_*`, `GEMINI_*`, `XAI_*`, or `AGNES_*` settings in `${CODEX_HOME:-$HOME/.codex}/imagegen.env` and invoke `scripts/image_gen_with_codex_env.py`. Never print their values.
 - Do not ask the user for `OPENAI_API_KEY` when using the built-in `image_gen` tool.
-- Never ask the user to paste the full key in chat. Ask them to set it locally and confirm when ready.
+- Never ask the user to paste any full key in chat. Ask them to set it locally and confirm when ready.
 
-If the key is missing, give the user these steps:
-1. Create an API key in the OpenAI platform UI: https://platform.openai.com/api-keys
-2. Set `OPENAI_API_KEY` as an environment variable in their system.
+If an unconfigured CLI key is missing, give the user these steps:
+1. Create an API key with the selected Provider.
+2. Set `OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, or `AGNES_API_KEY` as appropriate, preferably in the canonical `imagegen.env` file for configured mode.
 3. Offer to guide them through setting the environment variable for their OS/shell if needed.
 
 If installation is not possible in this environment, tell the user which dependency is missing and how to install it into their active environment.
@@ -358,5 +364,5 @@ If installation is not possible in this environment, tell the user which depende
 - `references/image-api.md`: fallback-only API/CLI parameter reference.
 - `references/codex-network.md`: fallback-only network/sandbox troubleshooting for CLI mode.
 - `scripts/image_gen.py`: fallback-only CLI implementation. Do not load or use it unless the user explicitly chooses CLI mode or explicitly confirms a transparent request's true CLI transparency fallback.
-- `scripts/image_gen_with_codex_env.py`: approved wrapper for configured local-endpoint mode and all `$hatch-pet` visual jobs; it loads the canonical Codex `imagegen.env` file and delegates to `scripts/image_gen.py`.
+- `scripts/image_gen_with_codex_env.py`: approved default wrapper whenever the canonical Codex `imagegen.env` file exists and for all `$hatch-pet` visual jobs; it loads the file and delegates to the selected Provider CLI.
 - `$CODEX_HOME/skills/.system/imagegen/scripts/remove_chroma_key.py`: local post-processing helper for built-in transparent-image requests.

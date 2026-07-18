@@ -9,11 +9,35 @@ import subprocess
 import sys
 
 
-ALLOWED_KEYS = {
+OPENAI_KEYS = {
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_IMAGE_MODEL",
 }
+GEMINI_KEYS = {
+    "GEMINI_API_KEY",
+    "GEMINI_API_MODE",
+    "GEMINI_BASE_URL",
+    "GEMINI_IMAGE_MODEL",
+}
+GROK_KEYS = {
+    "XAI_API_KEY",
+    "XAI_BASE_URL",
+    "XAI_IMAGE_MODEL",
+}
+AGNES_KEYS = {
+    "AGNES_API_KEY",
+    "AGNES_BASE_URL",
+    "AGNES_IMAGE_MODEL",
+}
+ALLOWED_KEYS = {
+    "IMAGE_PROVIDER",
+    *OPENAI_KEYS,
+    *GEMINI_KEYS,
+    *GROK_KEYS,
+    *AGNES_KEYS,
+}
+SUPPORTED_PROVIDERS = {"openai", "gemini", "grok", "agnes"}
 
 
 def _codex_home() -> Path:
@@ -50,29 +74,78 @@ def main() -> int:
         return 2
 
     file_values = _parse_env(env_path)
-    missing = [key for key in ("OPENAI_API_KEY", "OPENAI_BASE_URL") if not file_values.get(key)]
+    provider = file_values.get("IMAGE_PROVIDER", "openai").strip().lower() or "openai"
+    if provider not in SUPPORTED_PROVIDERS:
+        print(
+            f"Error: IMAGE_PROVIDER must be one of: {', '.join(sorted(SUPPORTED_PROVIDERS))}.",
+            file=sys.stderr,
+        )
+        return 2
+
+    required = {
+        "openai": ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
+        "gemini": ("GEMINI_API_KEY",),
+        "grok": ("XAI_API_KEY",),
+        "agnes": ("AGNES_API_KEY",),
+    }[provider]
+    missing = [key for key in required if not file_values.get(key)]
     if missing:
         print(f"Error: Missing required setting(s) in {env_path}: {', '.join(missing)}", file=sys.stderr)
         return 2
 
     child_env = os.environ.copy()
-    for key, value in file_values.items():
+    for key in OPENAI_KEYS | GEMINI_KEYS | GROK_KEYS | AGNES_KEYS | {"IMAGE_PROVIDER"}:
+        child_env.pop(key, None)
+    provider_keys = {
+        "openai": OPENAI_KEYS,
+        "gemini": GEMINI_KEYS,
+        "grok": GROK_KEYS,
+        "agnes": AGNES_KEYS,
+    }[provider]
+    for key in provider_keys:
+        value = file_values.get(key, "")
         if value:
             child_env[key] = value
+    child_env["IMAGE_PROVIDER"] = provider
 
     args = sys.argv[1:]
-    configured_model = child_env.get("OPENAI_IMAGE_MODEL", "").strip()
-    if configured_model and "--model" not in args:
-        if not configured_model.startswith("gpt-image-"):
+    model_key = {
+        "openai": "OPENAI_IMAGE_MODEL",
+        "gemini": "GEMINI_IMAGE_MODEL",
+        "grok": "XAI_IMAGE_MODEL",
+        "agnes": "AGNES_IMAGE_MODEL",
+    }[provider]
+    configured_model = child_env.get(model_key, "").strip()
+    has_explicit_model = any(arg == "--model" or arg.startswith("--model=") for arg in args)
+    image_commands = {"generate", "edit", "generate-batch"}
+    uses_image_model = bool(args) and args[0] in image_commands
+    if configured_model and uses_image_model and not has_explicit_model:
+        expected_prefixes = {
+            "openai": ("gpt-image-",),
+            "gemini": ("gemini-", "nano-banana"),
+            "grok": ("grok-imagine-image",),
+            "agnes": ("agnes-image-",),
+        }[provider]
+        if not configured_model.startswith(expected_prefixes):
             print(
-                "Error: OPENAI_IMAGE_MODEL must name a gpt-image-* model for imagegen.",
+                f"Error: {model_key} must start with one of "
+                f"{', '.join(expected_prefixes)} for imagegen.",
                 file=sys.stderr,
             )
             return 2
         args = [*args, "--model", configured_model]
 
-    cli = Path(__file__).with_name("image_gen.py")
-    print(f"Using Codex image configuration from {env_path}.", file=sys.stderr)
+    cli_name = {
+        "openai": "image_gen.py",
+        "gemini": "gemini_image_gen.py",
+        "grok": "grok_image_gen.py",
+        "agnes": "agnes_image_gen.py",
+    }[provider]
+    cli = Path(__file__).with_name(cli_name)
+    print(
+        f"Using {provider} image provider from Codex image configuration at {env_path}.",
+        file=sys.stderr,
+    )
     return subprocess.run([sys.executable, str(cli), *args], env=child_env, check=False).returncode
 
 

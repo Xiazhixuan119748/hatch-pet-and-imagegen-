@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Remove a solid chroma-key background from an image.
 
-This helper supports the imagegen skill's built-in-first transparent workflow:
+This helper supports the imagegen skill's selected-path transparent workflow:
 generate an image on a flat key color, then convert that key color to alpha.
 """
 

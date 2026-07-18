@@ -32,7 +32,7 @@ Before generating base art, row strips, or repair rows, load and follow the inst
 ${CODEX_HOME:-$HOME/.codex}/skills/.system/imagegen/SKILL.md
 ```
 
-Do not call an image API or create another image-generation path directly. The user explicitly authorizes `$imagegen` to invoke `scripts/image_gen_with_codex_env.py`, which loads `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and optional `OPENAI_IMAGE_MODEL` from `${CODEX_HOME:-$HOME/.codex}/imagegen.env` and delegates to the bundled CLI. This is the required generation path for hatch-pet visual jobs.
+Do not call an image API or create another image-generation path directly. The user explicitly authorizes `$imagegen` to invoke `scripts/image_gen_with_codex_env.py`, which reads `IMAGE_PROVIDER` plus only the selected OpenAI, Gemini, Grok, or Agnes settings from `${CODEX_HOME:-$HOME/.codex}/imagegen.env` and delegates to the matching bundled CLI. This is the required generation path for hatch-pet visual jobs.
 
 When invoking `$imagegen`, pass the generated pet prompt as the authoritative visual spec. Pet prompts should stay concise, state-specific, sprite-production oriented, and grounded in the listed input images. Keep longer policy and QA rules in this skill and the deterministic review scripts rather than expanding them into every image prompt. Do not wrap prompts in the generic `$imagegen` shared prompt schema.
 
@@ -50,7 +50,10 @@ Keep image generation isolated and bounded:
 - Workers must return only `selected_source=...` and `qa_note=...`; they must not include Markdown image previews, base64, or extra visual attachments in their final response.
 - The parent must not open every generated PNG visually. Use worker QA for each job and inspect only the final contact sheet.
 - After copying the selected generated output into `decoded/`, remove temporary source outputs when they are no longer needed.
-- Require `${CODEX_HOME:-$HOME/.codex}/imagegen.env` to contain `OPENAI_BASE_URL` and `OPENAI_API_KEY` before starting visual jobs. Allow optional `OPENAI_IMAGE_MODEL` as the image model default. Never print values, source the file into parent-shell logs, copy secrets into prompts/manifests, or pass credentials on the command line.
+- Require `${CODEX_HOME:-$HOME/.codex}/imagegen.env` to contain the selected Provider's settings before starting visual jobs: `OPENAI_API_KEY` plus `OPENAI_BASE_URL` for OpenAI, `GEMINI_API_KEY` for Gemini, `XAI_API_KEY` for Grok, or `AGNES_API_KEY` for Agnes. Allow the matching optional `*_IMAGE_MODEL` as the image model default. Never print values, source the file into parent-shell logs, copy secrets into prompts/manifests, or pass credentials on the command line.
+- When Gemini is selected, prefer `gemini-3.1-flash-image` for complete pets. Gemini supports only declared aspect ratios up to `21:9`; it does not support an `8:1` canvas. Request a supported wide canvas, keep the prompt's exact slot-count and separation constraints, and let the existing deterministic extraction reject malformed rows. Do not silently round an unsupported requested ratio or weaken row QA.
+- When Grok is selected, use `grok-imagine-image-quality`. Grok accepts at most three reference images and supports no wider than `20:9`. Keep exact slot-count and separation constraints, and treat complete Hatch Pet support as conditional on row-strip QA; do not claim compatibility merely because the API request succeeded.
+- When Agnes is selected, prefer `agnes-image-2.1-flash`; pass manifest references in their original order up to the Provider's local 16-image safety limit. Use `21:9` as the widest supported ratio and treat complete Hatch Pet support as conditional on row-strip QA. Do not run Grok's three-image packing step for Agnes.
 
 ## Brand Discovery
 
@@ -269,6 +272,16 @@ jq '.jobs[] | {id, kind, status, depends_on, prompt_file, retry_prompt_file, inp
 - Only after row 9 passes, generate row 10 as one coherent synthesis using the approved cardinal strip and completed row 9.
 
 Keep up to three generation workers active whenever three independent jobs are ready and worker capacity permits. Backfill an available slot immediately instead of waiting for a fixed wave to finish. Use two or one worker when the dependency graph exposes fewer ready jobs. Do not exceed three generation workers without explicit user direction.
+
+When the configured Provider is Grok and a job lists more than three `input_images`, prepare the Provider inputs before starting its worker:
+
+```bash
+"$PYTHON" "$SKILL_DIR/scripts/pack_grok_references.py" \
+  --run-dir "$RUN_DIR" \
+  --job-id "$JOB_ID"
+```
+
+Read `references/grok-packed/<job-id>/inputs.json` and attach only its ordered `packed_inputs`, preserving each reported role in the generation prompt. The report deterministically combines identity references and direction-continuity references while keeping the layout guide separate, records every original hash, and never changes a generated row or final atlas. Treat a packing failure as a blocker. Never drop a fourth reference silently, invent a different board, or treat board gutters as visual content. Remove board PNGs during final intermediate cleanup, but keep the JSON report when Grok was used.
 
 For each ready visual job, invoke `$imagegen` with the prompt file listed in `imagegen-jobs.json` and every listed input image with its role label. `$imagegen` must use `scripts/image_gen_with_codex_env.py` so the bundled CLI receives the user's configured endpoint, credentials, and optional model from the canonical Codex `imagegen.env` file. This skill approves that wrapper and no other direct image API or CLI path. The parent agent must keep its own image handling minimal: do not open every generated base or row in the parent rollout. Workers return only the selected source path and a one-sentence QA note; the parent records the selected source path in the manifest.
 
@@ -668,7 +681,7 @@ Write `qa/run-summary.json` after packaging:
 jq -n --arg run_dir "$RUN_DIR" --arg spritesheet "$RUN_DIR/final/spritesheet-extended.webp" --arg validation "$RUN_DIR/final/validation-extended.json" --arg chroma_despill "$RUN_DIR/qa/chroma-despill-extended.json" --arg contact_sheet "$RUN_DIR/qa/contact-sheet-extended.png" --arg direction_sheet "$RUN_DIR/qa/look-directions.png" --arg direction_semantics "$RUN_DIR/qa/direction-semantics.json" --arg blind_direction_validation "$RUN_DIR/qa/direction-blind-validation.json" --arg blind_review_resolution "$RUN_DIR/qa/blind-review-resolution.json" --arg continuity "$RUN_DIR/qa/look-continuity.json" --arg review "$RUN_DIR/qa/review.json" --arg package "$PET_DIR" '{ok: true, spriteVersionNumber: 2, run_dir: $run_dir, spritesheet: $spritesheet, validation: $validation, chroma_despill: $chroma_despill, contact_sheet: $contact_sheet, direction_sheet: $direction_sheet, direction_semantics: $direction_semantics, blind_direction_validation: $blind_direction_validation, blind_review_resolution: $blind_review_resolution, continuity: $continuity, review: $review, package: $package}' > "$RUN_DIR/qa/run-summary.json"
 ```
 
-After all QA and packaging succeed, keep `pet_request.json`, `final/spritesheet-extended.webp`, `final/validation-extended.json`, `qa/chroma-despill-extended.json`, `qa/contact-sheet-extended.png`, `qa/look-directions.png`, `qa/direction-semantics.json`, `qa/direction-blind-pairs.png`, `qa/direction-blind-answer-key.json`, `qa/direction-blind-verdicts.json`, `qa/direction-blind-validation.json`, `qa/blind-review-resolution.json` when an override was used, `qa/look-continuity.json`, `qa/previews/`, `qa/review.json`, and `qa/run-summary.json`. Remove prompts, layout guides, generated row strips, extracted frames, PNG intermediates, the 8x9 intermediate atlas, and the imagegen job manifest unless the user wants debug artifacts.
+After all QA and packaging succeed, keep `pet_request.json`, `final/spritesheet-extended.webp`, `final/validation-extended.json`, `qa/chroma-despill-extended.json`, `qa/contact-sheet-extended.png`, `qa/look-directions.png`, `qa/direction-semantics.json`, `qa/direction-blind-pairs.png`, `qa/direction-blind-answer-key.json`, `qa/direction-blind-verdicts.json`, `qa/direction-blind-validation.json`, `qa/blind-review-resolution.json` when an override was used, `qa/look-continuity.json`, `qa/previews/`, `qa/review.json`, `qa/run-summary.json`, and Grok `references/grok-packed/*/inputs.json` reports when present. Remove prompts, layout guides, Grok board PNGs, generated row strips, extracted frames, PNG intermediates, the 8x9 intermediate atlas, and the imagegen job manifest unless the user wants debug artifacts.
 
 ## Lightweight Visual Workers
 

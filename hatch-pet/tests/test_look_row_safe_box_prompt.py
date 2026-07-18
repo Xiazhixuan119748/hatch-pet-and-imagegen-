@@ -39,7 +39,7 @@ class LookRowSafeBoxPromptTest(unittest.TestCase):
                 run_dir / "prompts" / "row-retries" / "look-row-10.md",
             ]
             for prompt_path in prompt_paths:
-                prompt = prompt_path.read_text()
+                prompt = prompt_path.read_text(encoding="utf-8")
                 self.assertIn("DETERMINISTIC REGISTRATION", prompt)
                 self.assertIn("eight separated pose groups", prompt)
                 self.assertIn("shared scale and baseline", prompt)
@@ -57,14 +57,14 @@ class LookRowSafeBoxPromptTest(unittest.TestCase):
                 run_dir / "prompts" / "row-retries" / "look-row-10.md",
             ]
             for prompt_path in prompt_paths:
-                prompt = prompt_path.read_text()
+                prompt = prompt_path.read_text(encoding="utf-8")
                 self.assertIn("HARD LAYOUT AND CONTINUITY CONTRACT", prompt)
                 self.assertIn("same body height, head size, baseline", prompt)
                 self.assertIn("same coordinates across all eight frames", prompt)
                 self.assertIn("reject this result", prompt)
 
-            row_9 = (run_dir / "prompts" / "rows" / "look-row-9.md").read_text()
-            row_10 = (run_dir / "prompts" / "rows" / "look-row-10.md").read_text()
+            row_9 = (run_dir / "prompts" / "rows" / "look-row-9.md").read_text(encoding="utf-8")
+            row_10 = (run_dir / "prompts" / "rows" / "look-row-10.md").read_text(encoding="utf-8")
             self.assertIn("157.5 must be one even 22.5-degree step before 180", row_9)
             self.assertIn("180 must continue directly from row 9's 157.5", row_10)
             self.assertIn("337.5 must be one even 22.5-degree step before 000", row_10)
@@ -74,8 +74,8 @@ class LookRowSafeBoxPromptTest(unittest.TestCase):
             run_dir = self.prepare_run(temporary_directory)
 
             for prompt_kind in ("rows", "row-retries"):
-                row_9 = (run_dir / "prompts" / prompt_kind / "look-row-9.md").read_text()
-                row_10 = (run_dir / "prompts" / prompt_kind / "look-row-10.md").read_text()
+                row_9 = (run_dir / "prompts" / prompt_kind / "look-row-9.md").read_text(encoding="utf-8")
+                row_10 = (run_dir / "prompts" / prompt_kind / "look-row-10.md").read_text(encoding="utf-8")
 
                 self.assertIn("DIRECTION TARGETS", row_9)
                 self.assertIn("`045`: horizontal SCREEN-RIGHT and vertical UP", row_9)

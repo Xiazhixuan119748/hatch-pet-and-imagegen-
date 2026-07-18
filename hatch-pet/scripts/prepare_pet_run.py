@@ -934,6 +934,23 @@ def make_jobs(
                 "packaging_eligible": True,
             }
         )
+    for job in jobs:
+        job["provider_input_preparation"] = {
+            "grok": {
+                "max_images": 3,
+                "command": "scripts/pack_grok_references.py",
+                "report_path": f"references/grok-packed/{job['id']}/inputs.json",
+                "use_packed_inputs_when_original_count_exceeds": 3,
+                "silent_reference_dropping_allowed": False,
+            },
+            "agnes": {
+                "max_images": 16,
+                "command": None,
+                "use_original_inputs_in_order": True,
+                "silent_reference_dropping_allowed": False,
+                "documented_service_limit": False,
+            },
+        }
     return jobs
 
 

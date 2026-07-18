@@ -1,8 +1,8 @@
 # Image API quick reference
 
-This file is for the fallback CLI mode only. Use it when the user explicitly asks to use `scripts/image_gen.py` / CLI / API / model controls, or after the user explicitly confirms that a transparent-output request should use the `gpt-image-1.5` true-transparency fallback path.
+Use this file for configured `imagegen.env` Provider mode, when the user explicitly asks for CLI/API/model controls, or after the user explicitly confirms the `gpt-image-1.5` true-transparency fallback path.
 
-These parameters describe the Image API and bundled CLI fallback surface. Do not assume they are normal arguments on the built-in `image_gen` tool.
+These parameters describe the Provider CLIs. Do not assume they are normal arguments on the built-in `image_gen` tool.
 
 ## Scope
 - This fallback CLI is intended for GPT Image models (`gpt-image-2`, `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini`).
@@ -68,7 +68,7 @@ Model-specific note for `input_fidelity`:
 
 ## Transparent backgrounds
 
-`gpt-image-2` does not currently support the Image API `background=transparent` parameter. The skill's default transparent-image path is built-in `image_gen` with a flat chroma-key background, followed by local alpha extraction with `python "${CODEX_HOME:-$HOME/.codex}/skills/.system/imagegen/scripts/remove_chroma_key.py"`.
+`gpt-image-2` does not currently support the Image API `background=transparent` parameter. The skill's default transparent-image path uses the selected configured Provider or built-in tool with a flat chroma-key background, followed by local alpha extraction with `python "${CODEX_HOME:-$HOME/.codex}/skills/.system/imagegen/scripts/remove_chroma_key.py"`.
 
 Use CLI `gpt-image-1.5` with `background=transparent` and a transparent-capable output format such as `png` or `webp` only after the user explicitly confirms that fallback, unless they already requested `gpt-image-1.5`, `scripts/image_gen.py`, or CLI fallback. If the user asks for true/native transparency, the subject is too complex for clean chroma-key removal, or local background removal fails validation, explain the tradeoff and ask before switching.
 
@@ -88,3 +88,44 @@ Use CLI `gpt-image-1.5` with `background=transparent` and a transparent-capable 
 ## Important boundary
 - `quality`, `input_fidelity`, explicit masks, `background`, `output_format`, and related parameters are fallback-only execution controls.
 - Do not assume they are built-in `image_gen` tool arguments.
+
+## Gemini Provider
+
+Configured Gemini mode supports both Gemini image API formats, not the OpenAI Images endpoints. `GEMINI_API_MODE=generate-content` (the default) uses `client.models.generate_content(...)`; `GEMINI_API_MODE=interactions` uses `client.interactions.create(...)`. The mode is never changed automatically after a failed request. Recommended model: `gemini-3.1-flash-image`. Also accepted are `gemini-3.1-flash-lite-image`, `gemini-3-pro-image`, and `gemini-2.5-flash-image`. For third-party providers, the corresponding `nano-banana-2-lite`, `nano-banana-2`, `nano-banana-pro`, and `nano-banana` model IDs are also accepted and passed through unchanged. Only Gemini 3.1 Flash Lite Image and `nano-banana-2-lite` are locally restricted to `1K`, matching Google's explicit limit. Gemini 3.1 Flash Image and `nano-banana-2` additionally support the documented `0.5K` tier. No other model-specific resolution restriction is inferred locally.
+
+The CLI maps pixel sizes to Gemini's declared aspect ratio and image-size controls:
+
+| CLI size | Gemini response format |
+| --- | --- |
+| `1024x1024` | `1:1` + `1K` |
+| `2048x2048` | `1:1` + `2K` |
+| `4096x4096` | `1:1` + `4K` |
+| `1920x1080` | `16:9` + `2K` |
+| `3840x2160` | `16:9` + `4K` |
+| `1536x1024` | `3:2` + `2K` |
+| `1024x1536` | `2:3` + `2K` |
+| `auto` | Model defaults |
+
+Supported ratios are `1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, and `21:9`. Unsupported ratios such as `8:1` fail explicitly.
+
+Gemini edit input is an ordered list containing the text instruction followed by each base64 image block. Generate Content uses `contents` with `inline_data` and reads images from `candidates[].content.parts[].inline_data`; Interactions uses `input` image blocks and reads images from every `model_output` step. It has no mask equivalence in this implementation. A response without an image block fails. The response MIME type is inspected, and Pillow performs any requested PNG/JPEG/WebP conversion, compression, or downscaling locally.
+
+## Grok Imagine JSON Provider
+
+Configured Grok mode defaults to `grok-imagine-image-quality` and uses the JSON endpoints `POST /v1/images/generations` and `POST /v1/images/edits`. It accepts the official `grok-imagine-image` and `grok-imagine-image-quality` models plus their published aliases: `grok-imagine-image-2026-03-02`, `grok-imagine-image-quality-20260403`, `grok-imagine-image-quality-latest`, and `grok-imagine-image-pro`. xAI documents both primary models under the same generation, single-image edit, and multi-image edit request/response contracts; this Provider therefore changes only the `model` value between them. Generation is compatible with OpenAI SDK `images.generate()` when its base URL is `https://api.x.ai/v1`; editing is not compatible with OpenAI SDK `images.edit()` because that SDK sends multipart while xAI requires JSON.
+
+Grok supports `1k` and `2k` plus these aspect ratios: `1:1`, `3:4`, `4:3`, `9:16`, `16:9`, `2:3`, `3:2`, `9:19.5`, `19.5:9`, `9:20`, `20:9`, `1:2`, `2:1`, and `auto`. The CLI maps exact pixel ratios and fails rather than rounding unsupported values.
+
+Generation sends `model`, `prompt`, `n`, `aspect_ratio`, `resolution`, and `response_format=b64_json`. Same-prompt `n` is one request. Edit accepts local paths converted to Base64 data URIs, public image URLs, or xAI Files API references using `file_id:<id>`. One input is sent as `image`; two to three ordered inputs are sent as `images`; more than three fail. Single-image `size=auto` omits the aspect ratio so the source ratio is preserved. The `files` CLI subcommands expose upload, list, metadata, and delete operations through the xAI Files API.
+
+Responses are read from every `data[]` item. The Provider prefers `b64_json`, downloads a temporary `url` when necessary, validates source bytes with Pillow, and performs PNG/JPEG/WebP conversion, compression, and downscaling locally. `mask` and native transparent output are unsupported.
+
+## Agnes Image Provider
+
+Configured Agnes mode supports `agnes-image-2.0-flash` and the preferred `agnes-image-2.1-flash` at `https://apihub.agnes-ai.com/v1`. Every workflow posts JSON to `/images/generations`, including edits. This differs from OpenAI edit: ordered input Data URIs go in `extra_body.image`, and edit output selection goes in `extra_body.response_format`. Do not use `/images/edits`, multipart files, top-level `response_format`, or `tags`.
+
+Text generation sends `return_base64: true`. Same-prompt `n` creates independent requests because the Agnes image docs do not define an `n` field. Responses use OpenAI-style `created` plus `data[].url`, `data[].b64_json`, and `data[].revised_prompt`.
+
+Image 2.1 accepts `1K`, `2K`, `3K`, or `4K` with `1:1`, `3:4`, `4:3`, `16:9`, `9:16`, `2:3`, `3:2`, or `21:9`. The CLI validates the declared mathematical ratio, chooses the smallest tier that contains the requested dimensions, and reports the model's documented output size. Image 2.0 keeps exact `WIDTHxHEIGHT` values and maps `auto` to `1024x1024`.
+
+The Provider enforces a local 16-reference safety limit because the official image pages document an array but no service maximum. This is not a claim about Agnes server capacity. `mask` and native transparent output are unsupported; local format conversion and chroma-key removal remain unchanged.

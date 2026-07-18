@@ -6,7 +6,7 @@ SKILL = Path(__file__).resolve().parents[1] / "SKILL.md"
 
 class SingleFinalChromaPassTest(unittest.TestCase):
     def test_cleanup_runs_only_after_v2_assembly(self) -> None:
-        instructions = SKILL.read_text()
+        instructions = SKILL.read_text(encoding="utf-8")
 
         self.assertEqual(instructions.count("scripts/despill_chroma_edges.py"), 1)
         self.assertNotIn("chroma-despill-standard.json", instructions)
