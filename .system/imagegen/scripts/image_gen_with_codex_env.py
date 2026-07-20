@@ -83,7 +83,7 @@ def main() -> int:
         return 2
 
     required = {
-        "openai": ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
+        "openai": ("OPENAI_API_KEY",),
         "gemini": ("GEMINI_API_KEY",),
         "grok": ("XAI_API_KEY",),
         "agnes": ("AGNES_API_KEY",),

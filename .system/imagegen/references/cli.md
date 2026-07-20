@@ -23,7 +23,8 @@ OpenAI configuration:
 ```dotenv
 IMAGE_PROVIDER=openai
 OPENAI_API_KEY=replace-with-your-api-key
-OPENAI_BASE_URL=https://your-image-api.example/v1
+# Optional for the official endpoint; set this for an OpenAI-compatible relay.
+# OPENAI_BASE_URL=https://your-image-api.example/v1
 OPENAI_IMAGE_MODEL=gpt-image-2
 ```
 
@@ -175,6 +176,8 @@ python "$IMAGE_GEN" edit \
 - Do **not** create one-off runners (for example `gen_images.py`) unless the user explicitly asks for a custom wrapper.
 - **Never modify** `scripts/image_gen.py`. If something is missing, ask the user before doing anything else.
 - Do not silently downgrade from CLI `gpt-image-2` or built-in `image_gen` to CLI `gpt-image-1.5`; ask first unless the user already explicitly requested `gpt-image-1.5`, `scripts/image_gen.py`, or CLI fallback.
+- For a requested ratio, use `--aspect-ratio W:H` with an explicit exactly matching `--size`. The returned image is validated with a maximum 1% pixel-ratio tolerance.
+- Keep long-running commands in their original execution session. After a client/tool wait timeout, inspect the output and `.imagegen.lock` before any explicit retry; never automatically rerun an unknown request.
 
 ## Defaults
 - Model: `gpt-image-2`
@@ -193,6 +196,7 @@ python "$IMAGE_GEN" edit \
 - Use `--quality medium`, `--quality high`, or `--quality auto` for final assets, dense text, diagrams, identity-sensitive edits, and high-resolution outputs.
 - Square images are typically fastest. Use `--size 1024x1024` for quick square drafts.
 - If the user asks for 4K-style output, use `--size 3840x2160` for landscape or `--size 2160x3840` for portrait.
+- For a 3:4 request, use a true 3:4 size such as `--size 1536x2048 --aspect-ratio 3:4`; `1024x1536` is 2:3 and must not be used as a substitute.
 - Do not pass `--input-fidelity` with `gpt-image-2`; this model always uses high fidelity for image inputs.
 - Do not use `--background transparent` with `gpt-image-2`; the default transparent-image workflow uses the selected configured Provider or built-in tool on a flat chroma-key background plus local removal. Use `gpt-image-1.5` only after the user explicitly confirms the true-transparent CLI fallback, unless they already requested `gpt-image-1.5`, `scripts/image_gen.py`, or CLI fallback.
 
@@ -339,6 +343,11 @@ Notes:
 - `generate-batch` requires `--out-dir`.
 - generate-batch requires --out-dir.
 - Use `--concurrency` to control parallelism (default `5`).
+- Each JSONL line is an independent job. Jobs may run concurrently, but each job sends exactly one API request and waits for that request's result.
+- Automatic retries are disabled, including for timeouts, connection failures, and HTTP 429. A retry must be an explicit new attempt after a clear per-job `failed` result; never retry an `unknown` request automatically.
+- Each job writes a state file under `--state-dir` (default `<out-dir>/.imagegen-state`). Use `--summary-out` to choose the batch summary path. States are `pending`, `running`, `succeeded`, `failed`, `unknown`, or `abandoned`.
+- The summary is written even when some jobs fail. Always deliver all entries in `succeeded` first, then report `failed`, `unknown`, and `abandoned` entries. Partial success exits `0`; all explicit failures exit `1`; no success with an unknown job exits `2`.
+- Keep the original execution session alive for long API calls. Do not loop with `Start-Sleep` and resubmit when a tool wait expires. Check the output and generation lock first; an unconfirmed request is `unknown` until its state is known.
 - Per-job overrides are supported in JSONL (for example `size`, `quality`, `background`, `output_format`, `output_compression`, `moderation`, `n`, `model`, `out`, and prompt-augmentation fields).
 - `--n` generates multiple variants for a single prompt; `generate-batch` is for many different prompts.
 - In batch mode, per-job `out` is treated as a filename under `--out-dir`.

@@ -12,6 +12,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+from contextlib import AbstractContextManager
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -41,6 +43,8 @@ GPT_IMAGE_2_MIN_PIXELS = 655_360
 GPT_IMAGE_2_MAX_PIXELS = 8_294_400
 GPT_IMAGE_2_MAX_EDGE = 3840
 GPT_IMAGE_2_MAX_RATIO = 3.0
+ASPECT_RATIO_TOLERANCE = 0.01
+STALE_LOCK_SECONDS = 60 * 60
 
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_BATCH_JOBS = 500
@@ -116,6 +120,51 @@ def _parse_size(size: str) -> Optional[Tuple[int, int]]:
     if not match:
         return None
     return int(match.group(1)), int(match.group(2))
+
+
+def _parse_aspect_ratio(value: str) -> Tuple[int, int]:
+    match = re.fullmatch(r"([1-9][0-9]*):([1-9][0-9]*)", value.strip())
+    if not match:
+        _die("aspect-ratio must use W:H, for example 3:4.")
+    return int(match.group(1)), int(match.group(2))
+
+
+def _validate_requested_aspect_ratio(size: str, aspect_ratio: Optional[str]) -> None:
+    if not aspect_ratio:
+        return
+    target_width, target_height = _parse_aspect_ratio(aspect_ratio)
+    parsed = _parse_size(size)
+    if parsed is None:
+        _die("--aspect-ratio requires an explicit --size; --size auto is not allowed.")
+    width, height = parsed
+    if width * target_height != height * target_width:
+        _die(
+            f"--size {size} does not exactly match requested aspect ratio {aspect_ratio}."
+        )
+
+
+def _image_dimensions_and_validate(raw: bytes, aspect_ratio: Optional[str]) -> Tuple[int, int]:
+    try:
+        from PIL import Image
+    except Exception:
+        _die(f"Image validation requires Pillow. {_dependency_hint('pillow')}")
+    try:
+        with Image.open(BytesIO(raw)) as image:
+            image.load()
+            width, height = image.size
+    except Exception as exc:
+        _die(f"Generated image is invalid or unreadable: {exc}")
+    if aspect_ratio:
+        target_width, target_height = _parse_aspect_ratio(aspect_ratio)
+        actual = width / height
+        expected = target_width / target_height
+        relative_error = abs(actual - expected) / expected
+        if relative_error > ASPECT_RATIO_TOLERANCE:
+            _die(
+                f"Generated image is {width}x{height} ({actual:.4f}), which differs from "
+                f"requested aspect ratio {aspect_ratio} by {relative_error:.2%}; maximum is 1%."
+            )
+    return width, height
 
 
 def _validate_gpt_image_2_size(size: str) -> None:
@@ -309,16 +358,121 @@ def _print_request(payload: dict) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def _decode_and_write(images: List[str], outputs: List[Path], force: bool) -> None:
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _lock_path(output: Path) -> Path:
+    return output.with_name(f"{output.name}.imagegen.lock")
+
+
+class _OutputReservations(AbstractContextManager["_OutputReservations"]):
+    def __init__(self, outputs: Iterable[Path], *, force: bool):
+        self.outputs = list(dict.fromkeys(outputs))
+        self.force = force
+        self.acquired: List[Path] = []
+
+    def _acquire(self, output: Path) -> None:
+        lock = _lock_path(output)
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "pid": os.getpid(),
+            "started_at": time.time(),
+            "started_at_utc": datetime.now(timezone.utc).isoformat(),
+            "output": str(output.resolve()),
+        }
+        while True:
+            try:
+                with lock.open("x", encoding="utf-8") as handle:
+                    json.dump(payload, handle, sort_keys=True)
+                    handle.write("\n")
+                self.acquired.append(lock)
+                return
+            except FileExistsError:
+                try:
+                    current = json.loads(lock.read_text(encoding="utf-8"))
+                    pid = int(current.get("pid", 0))
+                    started_at = float(current.get("started_at", lock.stat().st_mtime))
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    pid = 0
+                    started_at = lock.stat().st_mtime
+                age = max(0.0, time.time() - started_at)
+                if _pid_is_running(pid):
+                    _die(
+                        f"Output is already reserved by active image generation PID {pid}: {output}"
+                    )
+                if age < STALE_LOCK_SECONDS:
+                    _die(
+                        f"Output has a recent orphaned generation lock ({age:.0f}s old): {lock}. "
+                        "Inspect the original request before retrying."
+                    )
+                _warn(f"Removing stale image generation lock: {lock}")
+                try:
+                    lock.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def __enter__(self) -> "_OutputReservations":
+        try:
+            for output in self.outputs:
+                if output.exists() and not self.force:
+                    _die(f"Output already exists: {output} (use --force to overwrite)")
+            for output in self.outputs:
+                self._acquire(output)
+        except BaseException:
+            self._release()
+            raise
+        return self
+
+    def _release(self) -> None:
+        for lock in reversed(self.acquired):
+            try:
+                lock.unlink()
+            except FileNotFoundError:
+                pass
+        self.acquired.clear()
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self._release()
+        return False
+
+
+def _all_output_paths(
+    outputs: Iterable[Path], downscale_max_dim: Optional[int], downscale_suffix: str
+) -> List[Path]:
+    paths = list(outputs)
+    if downscale_max_dim is not None:
+        paths.extend(_derive_downscale_path(path, downscale_suffix) for path in list(paths))
+    return paths
+
+
+def _decode_and_write(
+    images: List[str], outputs: List[Path], force: bool, aspect_ratio: Optional[str] = None
+) -> None:
     for idx, image_b64 in enumerate(images):
         if idx >= len(outputs):
             break
         out_path = outputs[idx]
         if out_path.exists() and not force:
             _die(f"Output already exists: {out_path} (use --force to overwrite)")
+        raw = base64.b64decode(image_b64)
+        width, height = _image_dimensions_and_validate(raw, aspect_ratio)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_bytes(base64.b64decode(image_b64))
+        out_path.write_bytes(raw)
         print(f"Wrote {out_path}")
+        print(f"Validated {out_path}: {width}x{height}", file=sys.stderr)
 
 
 def _derive_downscale_path(path: Path, suffix: str) -> Path:
@@ -369,29 +523,46 @@ def _decode_write_and_downscale(
     downscale_max_dim: Optional[int],
     downscale_suffix: str,
     output_format: str,
-) -> None:
+    aspect_ratio: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    if len(images) != len(outputs):
+        _die(f"Provider returned {len(images)} image(s), expected {len(outputs)}.")
+    validated: List[Dict[str, Any]] = []
+    prepared: List[Tuple[Path, bytes, Optional[bytes], int, int]] = []
     for idx, image_b64 in enumerate(images):
-        if idx >= len(outputs):
-            break
         out_path = outputs[idx]
         if out_path.exists() and not force:
             _die(f"Output already exists: {out_path} (use --force to overwrite)")
-        out_path.parent.mkdir(parents=True, exist_ok=True)
 
         raw = base64.b64decode(image_b64)
-        out_path.write_bytes(raw)
-        print(f"Wrote {out_path}")
-
+        width, height = _image_dimensions_and_validate(raw, aspect_ratio)
+        derived_bytes = None
         if downscale_max_dim is None:
-            continue
+            derived = None
+        else:
+            derived = _derive_downscale_path(out_path, downscale_suffix)
+            if derived.exists() and not force:
+                _die(f"Output already exists: {derived} (use --force to overwrite)")
+            derived_bytes = _downscale_image_bytes(raw, max_dim=downscale_max_dim, output_format=output_format)
+        prepared.append((out_path, raw, derived_bytes, width, height))
 
-        derived = _derive_downscale_path(out_path, downscale_suffix)
-        if derived.exists() and not force:
-            _die(f"Output already exists: {derived} (use --force to overwrite)")
-        derived.parent.mkdir(parents=True, exist_ok=True)
-        resized = _downscale_image_bytes(raw, max_dim=downscale_max_dim, output_format=output_format)
-        derived.write_bytes(resized)
-        print(f"Wrote {derived}")
+    for out_path, raw, derived_bytes, width, height in prepared:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        part = out_path.with_name(f"{out_path.name}.part")
+        part.write_bytes(raw)
+        part.replace(out_path)
+        print(f"Wrote {out_path}")
+        print(f"Validated {out_path}: {width}x{height}", file=sys.stderr)
+        item: Dict[str, Any] = {"path": str(out_path), "dimensions": f"{width}x{height}"}
+        validated.append(item)
+        if derived_bytes is not None:
+            derived = _derive_downscale_path(out_path, downscale_suffix)
+            derived_part = derived.with_name(f"{derived.name}.part")
+            derived_part.write_bytes(derived_bytes)
+            derived_part.replace(derived)
+            print(f"Wrote {derived}")
+            item["downscaled_path"] = str(derived)
+    return validated
 
 
 def _create_client():
@@ -399,7 +570,7 @@ def _create_client():
         from openai import OpenAI
     except ImportError:
         _die(f"openai SDK not installed in the active environment. {_dependency_hint('openai')}")
-    return OpenAI()
+    return OpenAI(max_retries=0)
 
 
 def _create_async_client():
@@ -416,7 +587,7 @@ def _create_async_client():
             "AsyncOpenAI not available in this openai SDK version. "
             f"{_dependency_hint('openai', upgrade=True)}"
         )
-    return AsyncOpenAI()
+    return AsyncOpenAI(max_retries=0)
 
 
 def _slugify(value: str) -> str:
@@ -531,46 +702,38 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 
 def _is_transient_error(exc: Exception) -> bool:
-    if _is_rate_limit_error(exc):
+    # A timeout or connection reset can occur after the server accepted a paid
+    # generation. Only retry an explicit rate-limit rejection automatically.
+    return _is_rate_limit_error(exc)
+
+
+def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.with_name(f"{path.name}.part")
+    part.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    part.replace(path)
+
+
+def _unknown_request_error(exc: BaseException) -> bool:
+    if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError, TimeoutError)):
         return True
     name = exc.__class__.__name__.lower()
-    if "timeout" in name or "timedout" in name or "tempor" in name:
-        return True
-    msg = str(exc).lower()
-    return "timeout" in msg or "timed out" in msg or "connection reset" in msg
+    message = str(exc).lower()
+    return any(token in name or token in message for token in ("timeout", "timed out", "connection reset", "connection error"))
 
 
-async def _generate_one_with_retries(
-    client: Any,
-    payload: Dict[str, Any],
-    *,
-    attempts: int,
-    job_label: str,
-) -> Any:
-    last_exc: Optional[Exception] = None
-    for attempt in range(1, attempts + 1):
-        try:
-            return await client.images.generate(**payload)
-        except Exception as exc:
-            last_exc = exc
-            if not _is_transient_error(exc):
-                raise
-            if attempt == attempts:
-                raise
-            sleep_s = _extract_retry_after_seconds(exc)
-            if sleep_s is None:
-                sleep_s = min(60.0, 2.0**attempt)
-            print(
-                f"{job_label} attempt {attempt}/{attempts} failed ({exc.__class__.__name__}); retrying in {sleep_s:.1f}s",
-                file=sys.stderr,
-            )
-            await asyncio.sleep(sleep_s)
-    raise last_exc or RuntimeError("unknown error")
+def _batch_state_path(state_dir: Path, job_id: str, attempt: int) -> Path:
+    safe = re.sub(r"[^a-zA-Z0-9_.-]+", "-", job_id).strip("-") or "job"
+    return state_dir / f"{safe}-attempt-{attempt}.json"
 
 
 async def _run_generate_batch(args: argparse.Namespace) -> int:
     jobs = _read_jobs_jsonl(args.input)
     out_dir = Path(args.out_dir)
+    configured_state_dir = getattr(args, "state_dir", None)
+    configured_summary_out = getattr(args, "summary_out", None)
+    state_dir = Path(configured_state_dir) if configured_state_dir else out_dir / ".imagegen-state"
+    summary_out = Path(configured_summary_out) if configured_summary_out else out_dir / "imagegen-batch-summary.json"
 
     base_fields = _fields_from_args(args)
     base_payload = {
@@ -627,78 +790,116 @@ async def _run_generate_batch(args: argparse.Namespace) -> int:
             )
         return 0
 
-    client = _create_async_client()
+    client = None
     sem = asyncio.Semaphore(args.concurrency)
+    job_ids = [str(job.get("id") or f"job-{i:03d}") for i, job in enumerate(jobs, start=1)]
+    if len(job_ids) != len(set(job_ids)):
+        _die("Batch job ids must be unique.")
 
-    any_failed = False
-
-    async def run_job(i: int, job: Dict[str, Any]) -> Tuple[int, Optional[str]]:
-        nonlocal any_failed
+    async def run_job(i: int, job: Dict[str, Any]) -> Dict[str, Any]:
+        nonlocal client
         prompt = str(job["prompt"]).strip()
-        job_label = f"[job {i}/{len(jobs)}]"
+        job_id = str(job.get("id") or f"job-{i:03d}")
+        attempt = int(job.get("attempt", 1))
+        state_path = _batch_state_path(state_dir, job_id, attempt)
+        job_label = f"[job {job_id}]"
+        state: Dict[str, Any] = {
+            "job_id": job_id,
+            "attempt": attempt,
+            "attempt_id": f"{job_id}-attempt-{attempt}",
+            "status": "pending",
+            "model": job.get("model", args.model),
+            "output_paths": [],
+            "error": None,
+            "started_at": None,
+            "finished_at": None,
+        }
+        _write_json_atomic(state_path, state)
 
-        fields = _merge_non_null(base_fields, job.get("fields", {}))
-        fields = _merge_non_null(fields, {k: job.get(k) for k in base_fields.keys()})
-        augmented = _augment_prompt_fields(args.augment, prompt, fields)
-
-        payload = dict(base_payload)
-        payload["prompt"] = augmented
-        payload = _merge_non_null(payload, {k: job.get(k) for k in base_payload.keys()})
-        payload = {k: v for k, v in payload.items() if v is not None}
-
-        n = int(payload.get("n", 1))
-        _validate_generate_payload(payload)
-        effective_output_format = _normalize_output_format(payload.get("output_format"))
-        _validate_transparency(payload.get("background"), effective_output_format)
-        payload["output_format"] = effective_output_format
-        outputs = _job_output_paths(
-            out_dir=out_dir,
-            output_format=effective_output_format,
-            idx=i,
-            prompt=prompt,
-            n=n,
-            explicit_out=job.get("out"),
-        )
         try:
-            async with sem:
-                print(f"{job_label} starting", file=sys.stderr)
-                started = time.time()
-                result = await _generate_one_with_retries(
-                    client,
-                    payload,
-                    attempts=args.max_attempts,
-                    job_label=job_label,
-                )
-                elapsed = time.time() - started
-                print(f"{job_label} completed in {elapsed:.1f}s", file=sys.stderr)
-            images = [item.b64_json for item in result.data]
-            _decode_write_and_downscale(
-                images,
-                outputs,
-                force=args.force,
-                downscale_max_dim=args.downscale_max_dim,
-                downscale_suffix=args.downscale_suffix,
-                output_format=effective_output_format,
+            fields = _merge_non_null(base_fields, job.get("fields", {}))
+            fields = _merge_non_null(fields, {k: job.get(k) for k in base_fields.keys()})
+            augmented = _augment_prompt_fields(args.augment, prompt, fields)
+            payload = dict(base_payload)
+            payload["prompt"] = augmented
+            payload = _merge_non_null(payload, {k: job.get(k) for k in base_payload.keys()})
+            payload = {k: v for k, v in payload.items() if v is not None}
+            n = int(payload.get("n", 1))
+            _validate_generate_payload(payload)
+            effective_output_format = _normalize_output_format(payload.get("output_format"))
+            _validate_transparency(payload.get("background"), effective_output_format)
+            payload["output_format"] = effective_output_format
+            aspect_ratio = job.get("aspect_ratio", args.aspect_ratio)
+            _validate_requested_aspect_ratio(str(payload.get("size", DEFAULT_SIZE)), aspect_ratio)
+            outputs = _job_output_paths(
+                out_dir=out_dir, output_format=effective_output_format, idx=i,
+                prompt=prompt, n=n, explicit_out=job.get("out"),
             )
-            return i, None
-        except Exception as exc:
-            any_failed = True
-            print(f"{job_label} failed: {exc}", file=sys.stderr)
-            if args.fail_fast:
-                raise
-            return i, str(exc)
+            state["output_paths"] = [str(path) for path in outputs]
+            state["status"] = "running"
+            state["started_at"] = datetime.now(timezone.utc).isoformat()
+            _write_json_atomic(state_path, state)
+            reserved = _all_output_paths(outputs, args.downscale_max_dim, args.downscale_suffix)
+            with _OutputReservations(reserved, force=getattr(args, "force", False)):
+                async with sem:
+                    # Create the client only after local preflight and lock
+                    # acquisition, so rejected duplicate jobs make no SDK/API
+                    # setup attempt at all.
+                    if client is None:
+                        client = _create_async_client()
+                    print(f"{job_label} starting attempt {attempt}", file=sys.stderr)
+                    started = time.time()
+                    result = await client.images.generate(**payload)
+                    print(f"{job_label} completed in {time.time() - started:.1f}s", file=sys.stderr)
+                images = [item.b64_json for item in result.data]
+                written = _decode_write_and_downscale(
+                    images, outputs, force=getattr(args, "force", False),
+                    downscale_max_dim=args.downscale_max_dim,
+                    downscale_suffix=args.downscale_suffix,
+                    output_format=effective_output_format,
+                    aspect_ratio=aspect_ratio,
+                )
+            state.update({"status": "succeeded", "outputs": written, "finished_at": datetime.now(timezone.utc).isoformat()})
+        except BaseException as exc:
+            state.update({
+                "status": "unknown" if _unknown_request_error(exc) else "failed",
+                "error": f"{exc.__class__.__name__}: {exc}",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            })
+            print(f"{job_label} {state['status']}: {exc}", file=sys.stderr)
+        _write_json_atomic(state_path, state)
+        return state
 
     tasks = [asyncio.create_task(run_job(i, job)) for i, job in enumerate(jobs, start=1)]
 
-    try:
-        await asyncio.gather(*tasks)
-    except Exception:
-        for t in tasks:
-            if not t.done():
-                t.cancel()
-        raise
-
-    return 1 if any_failed else 0
+    records = list(await asyncio.gather(*tasks))
+    succeeded = [item for item in records if item["status"] == "succeeded"]
+    failed = [item for item in records if item["status"] == "failed"]
+    unknown = [item for item in records if item["status"] == "unknown"]
+    abandoned = [item for item in records if item["status"] == "abandoned"]
+    if succeeded and (failed or unknown or abandoned):
+        status = "partial_success"
+    elif succeeded:
+        status = "succeeded"
+    elif unknown:
+        status = "unknown"
+    else:
+        status = "failed"
+    summary = {
+        "status": status,
+        "total": len(records),
+        "succeeded": [{"job_id": item["job_id"], **output} for item in succeeded for output in item.get("outputs", [])],
+        "failed": [{"job_id": item["job_id"], "error": item["error"]} for item in failed],
+        "unknown": [{"job_id": item["job_id"], "error": item["error"]} for item in unknown],
+        "abandoned": [{"job_id": item["job_id"], "error": item["error"]} for item in abandoned],
+    }
+    _write_json_atomic(summary_out, summary)
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    if status == "unknown":
+        return 2
+    if status == "failed":
+        return 1
+    return 0
 
 
 def _generate_batch(args: argparse.Namespace) -> None:
@@ -726,6 +927,7 @@ def _generate(args: argparse.Namespace) -> None:
 
     output_format = _normalize_output_format(args.output_format)
     _validate_transparency(args.background, output_format)
+    _validate_requested_aspect_ratio(args.size, args.aspect_ratio)
     payload["output_format"] = output_format
     output_paths = _build_output_paths(args.out, output_format, args.n, args.out_dir)
     downscaled = None
@@ -738,30 +940,34 @@ def _generate(args: argparse.Namespace) -> None:
                 "endpoint": "/v1/images/generations",
                 "outputs": [str(p) for p in output_paths],
                 "outputs_downscaled": downscaled,
+                "expected_aspect_ratio": args.aspect_ratio,
                 **payload,
             }
         )
         return
 
-    print(
-        "Calling Image API (generation). This can take up to a couple of minutes.",
-        file=sys.stderr,
-    )
-    started = time.time()
-    client = _create_client()
-    result = client.images.generate(**payload)
-    elapsed = time.time() - started
-    print(f"Generation completed in {elapsed:.1f}s.", file=sys.stderr)
+    reserved = _all_output_paths(output_paths, args.downscale_max_dim, args.downscale_suffix)
+    with _OutputReservations(reserved, force=args.force):
+        print(
+            "Calling Image API (generation). This can take up to several minutes; do not restart it after a client wait timeout.",
+            file=sys.stderr,
+        )
+        started = time.time()
+        client = _create_client()
+        result = client.images.generate(**payload)
+        elapsed = time.time() - started
+        print(f"Generation completed in {elapsed:.1f}s.", file=sys.stderr)
 
-    images = [item.b64_json for item in result.data]
-    _decode_write_and_downscale(
-        images,
-        output_paths,
-        force=args.force,
-        downscale_max_dim=args.downscale_max_dim,
-        downscale_suffix=args.downscale_suffix,
-        output_format=output_format,
-    )
+        images = [item.b64_json for item in result.data]
+        _decode_write_and_downscale(
+            images,
+            output_paths,
+            force=args.force,
+            downscale_max_dim=args.downscale_max_dim,
+            downscale_suffix=args.downscale_suffix,
+            output_format=output_format,
+            aspect_ratio=args.aspect_ratio,
+        )
 
 
 def _edit(args: argparse.Namespace) -> None:
@@ -794,6 +1000,7 @@ def _edit(args: argparse.Namespace) -> None:
 
     output_format = _normalize_output_format(args.output_format)
     _validate_transparency(args.background, output_format)
+    _validate_requested_aspect_ratio(args.size, args.aspect_ratio)
     payload["output_format"] = output_format
     _validate_input_fidelity(args.input_fidelity)
     output_paths = _build_output_paths(args.out, output_format, args.n, args.out_dir)
@@ -811,36 +1018,40 @@ def _edit(args: argparse.Namespace) -> None:
                 "endpoint": "/v1/images/edits",
                 "outputs": [str(p) for p in output_paths],
                 "outputs_downscaled": downscaled,
+                "expected_aspect_ratio": args.aspect_ratio,
                 **payload_preview,
             }
         )
         return
 
-    print(
-        f"Calling Image API (edit) with {len(image_paths)} image(s).",
-        file=sys.stderr,
-    )
-    started = time.time()
-    client = _create_client()
+    reserved = _all_output_paths(output_paths, args.downscale_max_dim, args.downscale_suffix)
+    with _OutputReservations(reserved, force=args.force):
+        print(
+            f"Calling Image API (edit) with {len(image_paths)} image(s); do not restart it after a client wait timeout.",
+            file=sys.stderr,
+        )
+        started = time.time()
+        client = _create_client()
 
-    with _open_files(image_paths) as image_files, _open_mask(mask_path) as mask_file:
-        request = dict(payload)
-        request["image"] = image_files if len(image_files) > 1 else image_files[0]
-        if mask_file is not None:
-            request["mask"] = mask_file
-        result = client.images.edit(**request)
+        with _open_files(image_paths) as image_files, _open_mask(mask_path) as mask_file:
+            request = dict(payload)
+            request["image"] = image_files if len(image_files) > 1 else image_files[0]
+            if mask_file is not None:
+                request["mask"] = mask_file
+            result = client.images.edit(**request)
 
-    elapsed = time.time() - started
-    print(f"Edit completed in {elapsed:.1f}s.", file=sys.stderr)
-    images = [item.b64_json for item in result.data]
-    _decode_write_and_downscale(
-        images,
-        output_paths,
-        force=args.force,
-        downscale_max_dim=args.downscale_max_dim,
-        downscale_suffix=args.downscale_suffix,
-        output_format=output_format,
-    )
+        elapsed = time.time() - started
+        print(f"Edit completed in {elapsed:.1f}s.", file=sys.stderr)
+        images = [item.b64_json for item in result.data]
+        _decode_write_and_downscale(
+            images,
+            output_paths,
+            force=args.force,
+            downscale_max_dim=args.downscale_max_dim,
+            downscale_suffix=args.downscale_suffix,
+            output_format=output_format,
+            aspect_ratio=args.aspect_ratio,
+        )
 
 
 def _open_files(paths: List[Path]):
@@ -903,6 +1114,10 @@ def _add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--prompt-file")
     parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--size", default=DEFAULT_SIZE)
+    parser.add_argument(
+        "--aspect-ratio",
+        help="Required output ratio as W:H; requires an explicit exactly matching --size",
+    )
     parser.add_argument("--quality", default=DEFAULT_QUALITY)
     parser.add_argument("--background")
     parser.add_argument("--output-format")
@@ -951,7 +1166,9 @@ def main() -> int:
     _add_shared_args(batch_parser)
     batch_parser.add_argument("--input", required=True, help="Path to JSONL file (one job per line)")
     batch_parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
-    batch_parser.add_argument("--max-attempts", type=int, default=3)
+    batch_parser.add_argument("--max-attempts", type=int, default=1, help="Deprecated; automatic retries are disabled")
+    batch_parser.add_argument("--state-dir", help="Directory for per-job state files")
+    batch_parser.add_argument("--summary-out", help="Path for the batch result summary JSON")
     batch_parser.add_argument("--fail-fast", action="store_true")
     batch_parser.set_defaults(func=_generate_batch)
 
@@ -969,6 +1186,8 @@ def main() -> int:
         _die("--concurrency must be between 1 and 25")
     if getattr(args, "max_attempts", 3) < 1 or getattr(args, "max_attempts", 3) > 10:
         _die("--max-attempts must be between 1 and 10")
+    if args.command == "generate-batch" and args.max_attempts != 1:
+        _die("Automatic batch retries are disabled; retry a failed job as a new explicit attempt.")
     if args.output_compression is not None and not (0 <= args.output_compression <= 100):
         _die("--output-compression must be between 0 and 100")
     if args.command == "generate-batch" and not args.out_dir:

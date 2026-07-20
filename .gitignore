@@ -14,6 +14,11 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+# Development-only files excluded from release branches
+.agents/
+.system/imagegen/tests/
+hatch-pet/tests/
+
 # OS and editor metadata
 .DS_Store
 Thumbs.db

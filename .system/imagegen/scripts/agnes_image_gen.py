@@ -192,6 +192,21 @@ def _map_size(size: str, model: str) -> dict[str, Any]:
     }
 
 
+def _validate_requested_ratio(size: str, value: Optional[str]) -> None:
+    if not value:
+        return
+    ratio_match = re.fullmatch(r"([1-9][0-9]*):([1-9][0-9]*)", value)
+    size_match = re.fullmatch(r"([1-9][0-9]*)x([1-9][0-9]*)", size)
+    if not ratio_match:
+        raise AgnesCliError("aspect-ratio must use W:H, for example 3:4.")
+    if not size_match:
+        raise AgnesCliError("--aspect-ratio requires an explicit --size; auto is not allowed.")
+    rw, rh = int(ratio_match.group(1)), int(ratio_match.group(2))
+    width, height = int(size_match.group(1)), int(size_match.group(2))
+    if width * rh != height * rw:
+        raise AgnesCliError(f"--size {size} does not exactly match aspect ratio {value}.")
+
+
 def _normalize_output_format(value: Optional[str]) -> str:
     fmt = (value or "png").lower()
     if fmt == "jpg":
@@ -202,6 +217,7 @@ def _normalize_output_format(value: Optional[str]) -> str:
 
 
 def _validate_options(args: argparse.Namespace) -> None:
+    _validate_requested_ratio(args.size, getattr(args, "aspect_ratio", None))
     mapped = _map_size(args.size, args.model)
     if mapped["downgraded"]:
         _warn(f"--size {args.size} exceeds Agnes Image 2.1's 4K tier and will map to 4K.")
@@ -642,6 +658,7 @@ def _add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--prompt-file")
     parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--size", default="auto")
+    parser.add_argument("--aspect-ratio")
     parser.add_argument("--quality")
     parser.add_argument("--background")
     parser.add_argument("--output-format")
